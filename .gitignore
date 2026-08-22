@@ -46,3 +46,9 @@ htmlcov/
 *~
 .DS_Store
 Thumbs.db
+
+# Agent local instructions
+agents.md
+AGENTS.md
+*.local.md
+
