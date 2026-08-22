@@ -396,6 +396,52 @@ def codetalk_info(
     return json.dumps(session.model_dump(mode="json", exclude={"steps"}), indent=2)
 
 
+@server.tool(
+    name="codetalk_branches",
+    description="Get the full DAG branch, fork points, and subagent hierarchy for a conversation.",
+)
+def codetalk_branches(
+    conversation_id: str,
+    harness: str,
+    root_path: str | None = None,
+) -> str:
+    """Get the full DAG branch hierarchy for a conversation."""
+    adapter = _get_adapter(harness)
+    tree = adapter.get_branch_tree(conversation_id=conversation_id, root_path=root_path)
+    if not tree:
+        raise ValueError(
+            f"No conversation or branches found for conversation_id='{conversation_id}' in harness='{harness}'"
+        )
+    return json.dumps(tree.model_dump(mode="json", exclude_none=True), indent=2)
+
+
+@server.tool(
+    name="codetalk_diff_branches",
+    description="Compare two branches of the same conversation, showing shared steps, divergence point, and distinct steps.",
+)
+def codetalk_diff_branches(
+    conversation_id: str,
+    branch_a: str,
+    branch_b: str,
+    harness: str,
+    root_path: str | None = None,
+) -> str:
+    """Compare two branches of a conversation."""
+    adapter = _get_adapter(harness)
+    diff = adapter.diff_branches(
+        conversation_id=conversation_id,
+        branch_a=branch_a,
+        branch_b=branch_b,
+        root_path=root_path,
+    )
+    if not diff:
+        raise ValueError(
+            f"Could not compute branch diff for branch_a='{branch_a}' and branch_b='{branch_b}' in conversation_id='{conversation_id}'"
+        )
+    return json.dumps(diff.model_dump(mode="json", exclude_none=True), indent=2)
+
+
+
 # ─── Entrypoint ───────────────────────────────────────────────────────────────
 
 

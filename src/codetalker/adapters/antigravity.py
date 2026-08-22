@@ -9,14 +9,16 @@ from pathlib import Path
 from typing import Any
 
 from codetalker.adapter_base import BaseAdapter
-
-logger = logging.getLogger("codetalker.adapters.antigravity")
 from codetalker.schema import (
     Actor,
     ActorRole,
     AttachmentBlock,
     BlockType,
+    BranchInfo,
+    BranchSummary,
     ContentBlock,
+    ConversationBranchTree,
+    ForkPoint,
     NormalizedSession,
     NormalizedStep,
     SystemEventBlock,
@@ -26,6 +28,8 @@ from codetalker.schema import (
     ToolResultBlock,
 )
 from codetalker.utils.timestamps import normalize_timestamp
+
+logger = logging.getLogger("codetalker.adapters.antigravity")
 
 
 def _clean_user_prompt(raw_text: str) -> str:
@@ -97,6 +101,7 @@ class AntigravityAdapter(BaseAdapter):
             total_steps = 0
             user_turns = 0
             assistant_turns = 0
+            child_subagent_ids: set[str] = set()
 
             with open(transcript_path, "r", encoding="utf-8", errors="ignore") as f:
                 for idx, line in enumerate(f):
@@ -122,6 +127,25 @@ class AntigravityAdapter(BaseAdapter):
                                     first_prompt = clean_c[:60].strip().replace("\n", " ")
                         elif stype == "PLANNER_RESPONSE":
                             assistant_turns += 1
+                            # Check tool calls for subagents
+                            tcalls = data.get("tool_calls") or []
+                            for tc in tcalls:
+                                if tc.get("name") == "invoke_subagent":
+                                    args = tc.get("args") or {}
+                                    if isinstance(args, str):
+                                        try:
+                                            args = json.loads(args)
+                                        except Exception:
+                                            args = {}
+                                    subagents_list = args.get("Subagents") or []
+                                    # Will be paired with conversationId in result
+                        elif stype == "GENERIC":
+                            content_str = data.get("content") or ""
+                            if "conversationId" in content_str or "conversation_id" in content_str:
+                                matches = re.findall(r'["\']?(?:conversationId|conversation_id)["\']?\s*:\s*["\']([^"\']+)["\']', content_str)
+                                for m in matches:
+                                    if m != session_id:
+                                        child_subagent_ids.add(m)
                     except Exception as e:
                         logger.debug(f"Failed to parse line {idx} in {transcript_path}: {e}")
                         continue
@@ -146,11 +170,86 @@ class AntigravityAdapter(BaseAdapter):
                 assistant_turn_count=assistant_turns,
                 source_path=transcript_path,
                 source_format="jsonl",
-                has_dag=False,
+                child_session_ids=sorted(list(child_subagent_ids)),
+                has_dag=len(child_subagent_ids) > 0,
             )
         except Exception as e:
             logger.warning(f"Error inspecting Antigravity transcript '{transcript_path}': {e}")
             return None
+
+    def get_branch_tree(
+        self,
+        conversation_id: str,
+        root_path: str | None = None,
+    ) -> ConversationBranchTree | None:
+        """Construct the branch and subagent tree for an Antigravity conversation."""
+        sessions = self.discover_sessions(root_path=root_path)
+        main_sess = next(
+            (s for s in sessions if s.session_id == conversation_id or s.conversation_id == conversation_id),
+            None,
+        )
+        if not main_sess:
+            return None
+
+        branches: list[BranchSummary] = [
+            BranchSummary(
+                branch_id=main_sess.session_id,
+                branch_label="Main Thread",
+                divergence_step_id=None,
+                leaf_step_id=main_sess.session_id,
+                step_count=main_sess.step_count,
+                user_turn_count=main_sess.user_turn_count,
+                assistant_turn_count=main_sess.assistant_turn_count,
+                model=main_sess.model,
+                is_active_path=True,
+                started_at=main_sess.started_at,
+                last_activity=main_sess.last_activity,
+            )
+        ]
+
+        fork_points: list[ForkPoint] = []
+        child_ids = list(main_sess.child_session_ids)
+
+        for child_id in child_ids:
+            child_sess = next((s for s in sessions if s.session_id == child_id), None)
+            if child_sess:
+                branches.append(
+                    BranchSummary(
+                        branch_id=child_sess.session_id,
+                        branch_label=f"Subagent · {child_sess.display_name[:30]}",
+                        divergence_step_id=main_sess.session_id,
+                        leaf_step_id=child_sess.session_id,
+                        step_count=child_sess.step_count,
+                        user_turn_count=child_sess.user_turn_count,
+                        assistant_turn_count=child_sess.assistant_turn_count,
+                        model=child_sess.model,
+                        is_active_path=False,
+                        started_at=child_sess.started_at,
+                        last_activity=child_sess.last_activity,
+                    )
+                )
+
+        if child_ids:
+            fork_points.append(
+                ForkPoint(
+                    step_id="invoke_subagents",
+                    prompt_preview="Spawned Subagent Delegations",
+                    variant_count=len(child_ids) + 1,
+                    branch_ids=[b.branch_id for b in branches],
+                )
+            )
+
+        return ConversationBranchTree(
+            conversation_id=conversation_id,
+            harness=self.harness_name,
+            display_name=main_sess.display_name,
+            active_branch_id=main_sess.session_id,
+            branch_count=len(branches),
+            branches=branches,
+            fork_points=fork_points,
+            child_subagent_sessions=child_ids,
+            has_dag=len(branches) > 1,
+        )
 
     # ─── Loading Steps ────────────────────────────────────────────────────────
 
@@ -219,6 +318,7 @@ class AntigravityAdapter(BaseAdapter):
                         timestamp=ts,
                         actor=Actor(role=ActorRole.USER),
                         blocks=blocks,
+                        branch=BranchInfo(step_id=f"step_{step_idx}"),
                         status=data.get("status"),
                         raw_data=data,
                         harness_step_type=stype,
@@ -250,6 +350,8 @@ class AntigravityAdapter(BaseAdapter):
 
                     # 3. Tool calls
                     tool_calls = data.get("tool_calls") or []
+                    spawned_id: str | None = None
+
                     for tc in tool_calls:
                         tc_name = tc.get("name") or "tool"
                         tc_args = tc.get("args") or {}
@@ -270,18 +372,12 @@ class AntigravityAdapter(BaseAdapter):
                     if not blocks:
                         blocks.append(TextBlock(text=""))
 
-                    # Check if subagent was invoked
-                    spawned_id = None
-                    for tc in tool_calls:
-                        if tc.get("name") == "invoke_subagent":
-                            # Will be resolved or matched
-                            pass
-
                     step = NormalizedStep(
                         step_index=data.get("step_index", step_idx),
                         timestamp=ts,
                         actor=Actor(role=ActorRole.ASSISTANT, model="Antigravity Model"),
                         blocks=blocks,
+                        branch=BranchInfo(step_id=f"step_{step_idx}"),
                         spawned_session_id=spawned_id,
                         status=data.get("status"),
                         raw_data=data,
@@ -305,6 +401,7 @@ class AntigravityAdapter(BaseAdapter):
                         timestamp=ts,
                         actor=Actor(role=ActorRole.TOOL),
                         blocks=blocks,
+                        branch=BranchInfo(step_id=f"step_{step_idx}"),
                         status=data.get("status"),
                         raw_data=data,
                         harness_step_type="tool_result",
@@ -325,6 +422,7 @@ class AntigravityAdapter(BaseAdapter):
                         timestamp=ts,
                         actor=Actor(role=ActorRole.SYSTEM),
                         blocks=blocks,
+                        branch=BranchInfo(step_id=f"step_{step_idx}"),
                         status=data.get("status"),
                         raw_data=data,
                         harness_step_type=stype,

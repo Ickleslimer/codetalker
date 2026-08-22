@@ -164,6 +164,57 @@ class NormalizedStep(BaseModel):
     harness_step_type: str | None = None
 
 
+# ─── Branch Tree Models ───────────────────────────────────────────────────────
+
+class BranchSummary(BaseModel):
+    branch_id: str
+    branch_label: str
+    divergence_step_id: str | None = None
+    leaf_step_id: str | None = None
+    step_count: int = 0
+    user_turn_count: int = 0
+    assistant_turn_count: int = 0
+    model: str | None = None
+    is_active_path: bool = False
+    started_at: str | None = None
+    last_activity: str | None = None
+
+
+class ForkPoint(BaseModel):
+    step_id: str
+    step_index: int | None = None
+    prompt_preview: str | None = None
+    variant_count: int = 0
+    branch_ids: list[str] = Field(default_factory=list)
+
+
+class ConversationBranchTree(BaseModel):
+    conversation_id: str
+    harness: str
+    display_name: str | None = None
+    active_branch_id: str | None = None
+    branch_count: int = 0
+    branches: list[BranchSummary] = Field(default_factory=list)
+    fork_points: list[ForkPoint] = Field(default_factory=list)
+    child_subagent_sessions: list[str] = Field(default_factory=list)
+    has_dag: bool = False
+
+
+class BranchDiff(BaseModel):
+    conversation_id: str
+    harness: str
+    branch_a_id: str
+    branch_b_id: str
+    divergence_step_id: str | None = None
+    divergence_step_index: int | None = None
+    common_step_count: int = 0
+    branch_a_distinct_step_count: int = 0
+    branch_b_distinct_step_count: int = 0
+    common_steps: list[NormalizedStep] = Field(default_factory=list)
+    branch_a_distinct_steps: list[NormalizedStep] = Field(default_factory=list)
+    branch_b_distinct_steps: list[NormalizedStep] = Field(default_factory=list)
+
+
 # ─── Session ──────────────────────────────────────────────────────────────────
 
 class NormalizedSession(BaseModel):

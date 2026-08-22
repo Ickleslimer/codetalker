@@ -16,6 +16,7 @@ from codetalker.schema import (
     ActorRole,
     AttachmentBlock,
     BlockType,
+    BranchInfo,
     ContentBlock,
     NormalizedSession,
     NormalizedStep,
@@ -103,12 +104,13 @@ class FreebuffAdapter(BaseAdapter):
                 assistant_turns = cnt_row[2] if cnt_row and cnt_row[2] else 0
 
                 display_name = title or f"Freebuff Session {tid[:8]}"
+                root_conv_id = fork_src if fork_src else tid
 
                 sess = NormalizedSession(
                     session_id=tid,
                     harness="freebuff",
                     display_name=display_name,
-                    conversation_id=tid,
+                    conversation_id=root_conv_id,
                     branch_root_step_id=fork_src,
                     branch_label="Forked Thread" if fork_src else "Main Thread",
                     started_at=started_at,
@@ -250,6 +252,7 @@ class FreebuffAdapter(BaseAdapter):
                     timestamp=ts or session.last_activity,
                     actor=Actor(role=role, model=session.model if role == ActorRole.ASSISTANT else None),
                     blocks=blocks,
+                    branch=BranchInfo(step_id=f"seq_{seq}"),
                     raw_data=raw_entry,
                     harness_step_type=f"freebuff_{role_str}",
                 )

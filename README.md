@@ -59,6 +59,8 @@ CodeTalker is an agent-callable tool and MCP server that normalizes conversation
 |---|---|---|
 | `codetalk_list` | `harness`, `conversation_id`, `since`, `limit`, `root_path` | List conversation sessions and branch threads across one or all coding harnesses (deduplicated across aliases). |
 | `codetalk_read` | `session_id`, `harness`, `since`, `until`, `since_last_user_input`, `include_thinking`, `limit`, `root_path` | Read and normalize transcript steps for a specific session thread. |
+| `codetalk_branches` | `conversation_id`, `harness`, `root_path` | Get the full DAG branch tree, fork points, variant counts, and subagent hierarchy for a conversation. |
+| `codetalk_diff_branches` | `conversation_id`, `branch_a`, `branch_b`, `harness`, `root_path` | Compare two branches of a conversation, returning shared ancestor steps, divergence point, and distinct steps. |
 | `codetalk_filter` | `session_id`, `harness`, `keywords`, `step_types`, `actor_roles`, `since_last_user_input`, `include_thinking`, `limit`, `root_path` | Filter steps in a session by keywords, step types, or actor roles. |
 | `codetalk_search` | `query`, `harness`, `since`, `limit`, `max_sessions_to_search`, `root_path` | Fast search across session titles and recent transcripts. |
 | `codetalk_info` | `session_id`, `harness`, `root_path` | Fast metadata retrieval for a session without loading step bodies. |
