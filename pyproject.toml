@@ -1,0 +1,28 @@
+[project]
+name = "codetalker"
+version = "0.1.0"
+description = "Cross-harness agent conversation transcript normalizer and MCP server"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ccl-chromium-reader",
+    "click>=8.4.2",
+    "mcp>=2.0.0",
+    "pydantic>=2.13.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[project.scripts]
+codetalker = "codetalker.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+ccl-chromium-reader = { git = "https://github.com/cclgroupltd/ccl_chromium_reader.git" }

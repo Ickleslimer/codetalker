@@ -1,0 +1,97 @@
+[
+  {
+    "id": "conv-test-uuid-1234",
+    "title": "Build a React Auth Hook",
+    "create_time": 1718900000.123456,
+    "update_time": 1718900500.654321,
+    "current_node": "node-4",
+    "mapping": {
+      "node-1": {
+        "id": "node-1",
+        "message": {
+          "id": "msg-1",
+          "author": { "role": "user", "name": null },
+          "create_time": 1718900000.123456,
+          "content": {
+            "content_type": "text",
+            "parts": ["Create an auth hook in React TypeScript"]
+          },
+          "status": "finished_successfully"
+        },
+        "parent": null,
+        "children": ["node-2", "node-fork-1"]
+      },
+      "node-2": {
+        "id": "node-2",
+        "message": {
+          "id": "msg-2",
+          "author": { "role": "assistant", "name": null },
+          "create_time": 1718900005.789012,
+          "content": {
+            "content_type": "text",
+            "parts": ["Here is the useAuth hook code..."]
+          },
+          "status": "finished_successfully",
+          "metadata": {
+            "model_slug": "gpt-4o",
+            "thought": "Let's structure the auth hook with React context."
+          }
+        },
+        "parent": "node-1",
+        "children": ["node-3"]
+      },
+      "node-3": {
+        "id": "node-3",
+        "message": {
+          "id": "msg-3",
+          "author": { "role": "user", "name": null },
+          "create_time": 1718900100.0,
+          "content": {
+            "content_type": "text",
+            "parts": ["Can you add token refresh logic?"]
+          },
+          "status": "finished_successfully"
+        },
+        "parent": "node-2",
+        "children": ["node-4"]
+      },
+      "node-4": {
+        "id": "node-4",
+        "message": {
+          "id": "msg-4",
+          "author": { "role": "assistant", "name": null },
+          "create_time": 1718900105.0,
+          "content": {
+            "content_type": "text",
+            "parts": ["Here is the updated hook with token refresh."]
+          },
+          "status": "finished_successfully",
+          "metadata": {
+            "model_slug": "gpt-4o",
+            "thought": "Need to implement a silent refresh timer."
+          }
+        },
+        "parent": "node-3",
+        "children": []
+      },
+      "node-fork-1": {
+        "id": "node-fork-1",
+        "message": {
+          "id": "msg-fork-1",
+          "author": { "role": "assistant", "name": null },
+          "create_time": 1718900006.0,
+          "content": {
+            "content_type": "text",
+            "parts": ["Alternative: here is an auth hook using Zustand instead."]
+          },
+          "status": "finished_successfully",
+          "metadata": {
+            "model_slug": "gpt-4o-mini"
+          }
+        },
+        "parent": "node-1",
+        "children": []
+      }
+    }
+  }
+]
