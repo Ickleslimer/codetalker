@@ -23,7 +23,6 @@ def _get_adapter(harness: str | None = None) -> Any:
         adapter = registry.get(harness)
         if adapter:
             return adapter
-    # If no harness or unrecognized, return default canonical or raise
     canonical = registry.list_canonical_harnesses()
     if harness:
         raise ValueError(
@@ -34,47 +33,55 @@ def _get_adapter(harness: str | None = None) -> Any:
     raise ValueError("No adapters registered")
 
 
-def _find_session(
-    session_id: str, harness: str | None = None, root_path: str | None = None
-) -> tuple[Any, NormalizedSession]:
-    """Robustly find a session by exact ID, prefix, URI, or title across harnesses."""
-    clean_id = session_id.strip().strip("'\"")
-    if clean_id.startswith("conversation://"):
-        clean_id = clean_id[len("conversation://") :]
-    if clean_id.startswith("file://"):
-        clean_id = clean_id[len("file://") :]
-    clean_id = clean_id.replace("\\", "/").rstrip("/")
-    if "/" in clean_id:
-        parts = [
-            p
-            for p in clean_id.split("/")
-            if p
-            and p
-            not in (
-                "transcript.jsonl",
-                "logs",
-                ".system_generated",
-                "state.vscdb",
-                "drafts.sqlite",
-            )
-        ]
-        if parts:
-            clean_id = parts[-1]
+def _extract_block_text(b: Any) -> str:
+    """Safely extract all searchable/filterable text from any ContentBlock without NoneType concatenation."""
+    parts: list[str] = []
+    # Text block & Thinking block
+    t = getattr(b, "text", None)
+    if t is not None:
+        parts.append(str(t))
+    # Content block / Tool result
+    c = getattr(b, "content", None)
+    if c is not None:
+        parts.append(str(c))
+    # Tool call name and args
+    tn = getattr(b, "tool_name", None)
+    if tn is not None:
+        parts.append(str(tn))
+    ta = getattr(b, "tool_args", None)
+    if ta is not None:
+        try:
+            parts.append(json.dumps(ta))
+        except Exception:
+            parts.append(str(ta))
+    # Code diffs
+    d = getattr(b, "diff", None)
+    if d is not None:
+        parts.append(str(d))
+    uri = getattr(b, "file_uri", None)
+    if uri is not None:
+        parts.append(str(uri))
+    # Attachments
+    nm = getattr(b, "name", None)
+    if nm is not None:
+        parts.append(str(nm))
+    p = getattr(b, "path", None)
+    if p is not None:
+        parts.append(str(p))
+    # System events
+    ev = getattr(b, "event_name", None)
+    if ev is not None:
+        parts.append(str(ev))
+    dt = getattr(b, "detail", None)
+    if dt is not None:
+        parts.append(str(dt))
+    return " ".join(parts)
 
-    clean_id_lower = clean_id.lower()
 
-    # Determine candidate adapters
-    candidate_adapters: list[Any] = []
-    if harness:
-        adapter = registry.get(harness)
-        if adapter:
-            candidate_adapters.append(adapter)
-    if not candidate_adapters:
-        for h in registry.list_canonical_harnesses():
-            ad = registry.get(h)
-            if ad and ad not in candidate_adapters:
-                candidate_adapters.append(ad)
-
+def _search_candidate_sessions(
+    clean_id_lower: str, candidate_adapters: list[Any], root_path: str | None = None
+) -> tuple[Any, NormalizedSession] | None:
+    """Search for a session matching clean_id_lower across candidate adapters."""
     # 1. Exact match on session_id or conversation_id
     for ad in candidate_adapters:
         try:
@@ -128,7 +135,7 @@ def _find_session(
                     steps = ad.load_steps(session=s, limit=10)
                     for st in steps:
                         for b in st.blocks:
-                            txt = getattr(b, "text", "") or getattr(b, "content", "")
+                            txt = _extract_block_text(b)
                             if clean_id_lower in txt.lower():
                                 return ad, s
                 except Exception:
@@ -136,10 +143,63 @@ def _find_session(
         except Exception:
             continue
 
+    return None
+
+
+def _find_session(
+    session_id: str, harness: str | None = None, root_path: str | None = None
+) -> tuple[Any, NormalizedSession]:
+    """Robustly find a session by exact ID, prefix, URI, or title across harnesses with graceful root_path fallback."""
+    clean_id = session_id.strip().strip("'\"")
+    if clean_id.startswith("conversation://"):
+        clean_id = clean_id[len("conversation://") :]
+    if clean_id.startswith("file://"):
+        clean_id = clean_id[len("file://") :]
+    clean_id = clean_id.replace("\\", "/").rstrip("/")
+    if "/" in clean_id:
+        parts = [
+            p
+            for p in clean_id.split("/")
+            if p
+            and p
+            not in (
+                "transcript.jsonl",
+                "logs",
+                ".system_generated",
+                "state.vscdb",
+                "drafts.sqlite",
+            )
+        ]
+        if parts:
+            clean_id = parts[-1]
+
+    clean_id_lower = clean_id.lower()
+
+    # Determine candidate adapters
+    candidate_adapters: list[Any] = []
+    if harness:
+        adapter = registry.get(harness)
+        if adapter:
+            candidate_adapters.append(adapter)
+    if not candidate_adapters:
+        for h in registry.list_canonical_harnesses():
+            ad = registry.get(h)
+            if ad and ad not in candidate_adapters:
+                candidate_adapters.append(ad)
+
+    # 1. Search with root_path if provided
+    res = _search_candidate_sessions(clean_id_lower, candidate_adapters, root_path=root_path)
+    if res:
+        return res
+
+    # 2. If root_path was provided and search failed, fallback to global discovery
+    if root_path is not None:
+        res = _search_candidate_sessions(clean_id_lower, candidate_adapters, root_path=None)
+        if res:
+            return res
+
     h_msg = f" for harness '{harness}'" if harness else " across all harnesses"
-    raise ValueError(
-        f"Session '{session_id}' not found{h_msg}."
-    )
+    raise ValueError(f"Session '{session_id}' not found{h_msg}.")
 
 
 # ─── Tools ────────────────────────────────────────────────────────────────────
@@ -332,14 +392,9 @@ def codetalk_filter(
         for step in steps:
             step_text = ""
             for b in step.blocks:
-                if hasattr(b, "text"):
-                    step_text += " " + getattr(b, "text", "")
-                if hasattr(b, "content"):
-                    step_text += " " + getattr(b, "content", "")
-                if hasattr(b, "tool_name"):
-                    step_text += " " + getattr(b, "tool_name", "")
-                if hasattr(b, "tool_args"):
-                    step_text += " " + json.dumps(getattr(b, "tool_args", {}))
+                extracted = _extract_block_text(b)
+                if extracted:
+                    step_text += " " + extracted
 
             if any(k in step_text.lower() for k in kw_lower):
                 filtered_by_kw.append(step)
@@ -426,18 +481,7 @@ def codetalk_search(
                     steps = adapter.load_steps(session=sess, limit=50)
                     for s in steps:
                         for b in s.blocks:
-                            text_val = ""
-                            if hasattr(b, "text"):
-                                text_val = getattr(b, "text", "")
-                            elif hasattr(b, "content"):
-                                text_val = getattr(b, "content", "")
-                            elif hasattr(b, "tool_name"):
-                                text_val = (
-                                    getattr(b, "tool_name", "")
-                                    + " "
-                                    + json.dumps(getattr(b, "tool_args", {}))
-                                )
-
+                            text_val = _extract_block_text(b)
                             if query_lower in text_val.lower():
                                 idx = text_val.lower().find(query_lower)
                                 start = max(0, idx - 40)

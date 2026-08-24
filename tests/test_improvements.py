@@ -1,7 +1,14 @@
 import json
 from pathlib import Path
 from codetalker.registry import registry
-from codetalker.server import codetalk_list, codetalk_read, codetalk_search, codetalk_info, codetalk_branches
+from codetalker.server import (
+    codetalk_list,
+    codetalk_read,
+    codetalk_search,
+    codetalk_filter,
+    codetalk_info,
+    codetalk_branches,
+)
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -102,3 +109,42 @@ def test_server_fuzzy_and_optional_harness_resolution():
     branches_str = codetalk_branches(conversation_id="conv-test-uuid-1234", root_path=str(FIXTURES_DIR))
     branches_data = json.loads(branches_str)
     assert branches_data["conversation_id"] == "conv-test-uuid-1234"
+
+
+def test_filter_keywords_on_steps_with_none_fields():
+    # Test filtering with keywords on fixture session containing ToolResultBlock with tool_name=None
+    res_str = codetalk_filter(
+        session_id="conv-test-uuid-1234",
+        harness="chatgpt",
+        keywords=["auth"],
+        root_path=str(FIXTURES_DIR),
+    )
+    data = json.loads(res_str)
+    assert data["session_id"] == "conv-test-uuid-1234"
+    assert data["returned_step_count"] >= 1
+
+    # Search with keywords on rollout containing function outputs
+    rollout_file = FIXTURES_DIR / "codex_sample_rollout.jsonl"
+    res_str2 = codetalk_filter(
+        session_id="codex_sample_rollout",
+        harness="chatgpt",
+        keywords=["healthy", "latency"],
+        root_path=str(rollout_file),
+    )
+    data2 = json.loads(res_str2)
+    assert data2["returned_step_count"] >= 1
+
+
+def test_read_with_unmatched_root_path_fallback(tmp_path):
+    # Pass an empty workspace root_path; should gracefully fallback to global discovery
+    discovered = codetalk_list(limit=5)
+    data = json.loads(discovered)
+    if data["sessions"]:
+        sess = data["sessions"][0]
+        read_str = codetalk_read(
+            session_id=sess["session_id"],
+            harness=sess["harness"],
+            root_path=str(tmp_path),  # Empty directory
+        )
+        read_data = json.loads(read_str)
+        assert read_data["session"]["session_id"] == sess["session_id"]
