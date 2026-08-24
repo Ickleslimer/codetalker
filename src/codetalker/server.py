@@ -18,29 +18,127 @@ logger = logging.getLogger("codetalker.server")
 server = MCPServer("codetalker")
 
 
-def _get_adapter(harness: str):
-    adapter = registry.get(harness)
-    if not adapter:
+def _get_adapter(harness: str | None = None) -> Any:
+    if harness:
+        adapter = registry.get(harness)
+        if adapter:
+            return adapter
+    # If no harness or unrecognized, return default canonical or raise
+    canonical = registry.list_canonical_harnesses()
+    if harness:
         raise ValueError(
             f"Unknown harness '{harness}'. Registered harnesses: {registry.list_harnesses()}"
         )
-    return adapter
+    if canonical:
+        return registry.get(canonical[0])
+    raise ValueError("No adapters registered")
 
 
 def _find_session(
-    session_id: str, harness: str, root_path: str | None = None
+    session_id: str, harness: str | None = None, root_path: str | None = None
 ) -> tuple[Any, NormalizedSession]:
-    adapter = _get_adapter(harness)
-    sessions = adapter.discover_sessions(root_path=root_path)
-    for s in sessions:
-        if s.session_id == session_id:
-            return adapter, s
-    # Also check if session_id matches conversation_id
-    for s in sessions:
-        if s.conversation_id == session_id and s.branch_root_step_id is None:
-            return adapter, s
+    """Robustly find a session by exact ID, prefix, URI, or title across harnesses."""
+    clean_id = session_id.strip().strip("'\"")
+    if clean_id.startswith("conversation://"):
+        clean_id = clean_id[len("conversation://") :]
+    if clean_id.startswith("file://"):
+        clean_id = clean_id[len("file://") :]
+    clean_id = clean_id.replace("\\", "/").rstrip("/")
+    if "/" in clean_id:
+        parts = [
+            p
+            for p in clean_id.split("/")
+            if p
+            and p
+            not in (
+                "transcript.jsonl",
+                "logs",
+                ".system_generated",
+                "state.vscdb",
+                "drafts.sqlite",
+            )
+        ]
+        if parts:
+            clean_id = parts[-1]
+
+    clean_id_lower = clean_id.lower()
+
+    # Determine candidate adapters
+    candidate_adapters: list[Any] = []
+    if harness:
+        adapter = registry.get(harness)
+        if adapter:
+            candidate_adapters.append(adapter)
+    if not candidate_adapters:
+        for h in registry.list_canonical_harnesses():
+            ad = registry.get(h)
+            if ad and ad not in candidate_adapters:
+                candidate_adapters.append(ad)
+
+    # 1. Exact match on session_id or conversation_id
+    for ad in candidate_adapters:
+        try:
+            sessions = ad.discover_sessions(root_path=root_path)
+            for s in sessions:
+                if s.session_id.lower() == clean_id_lower:
+                    return ad, s
+                if (
+                    s.conversation_id
+                    and s.conversation_id.lower() == clean_id_lower
+                    and s.branch_root_step_id is None
+                ):
+                    return ad, s
+        except Exception as e:
+            logger.debug(f"Error discovering sessions for {ad.harness_name}: {e}")
+            continue
+
+    # 2. Prefix match (if >= 6 chars)
+    if len(clean_id_lower) >= 6:
+        for ad in candidate_adapters:
+            try:
+                sessions = ad.discover_sessions(root_path=root_path)
+                for s in sessions:
+                    if s.session_id.lower().startswith(clean_id_lower):
+                        return ad, s
+                    if s.conversation_id and s.conversation_id.lower().startswith(
+                        clean_id_lower
+                    ):
+                        return ad, s
+            except Exception:
+                continue
+
+    # 3. Substring match on session_id or display_name
+    for ad in candidate_adapters:
+        try:
+            sessions = ad.discover_sessions(root_path=root_path)
+            for s in sessions:
+                if clean_id_lower in s.session_id.lower():
+                    return ad, s
+                if s.display_name and clean_id_lower in s.display_name.lower():
+                    return ad, s
+        except Exception:
+            continue
+
+    # 4. Fallback search inside recent session steps for keyword/title
+    for ad in candidate_adapters:
+        try:
+            sessions = ad.discover_sessions(root_path=root_path)
+            for s in sessions[:20]:
+                try:
+                    steps = ad.load_steps(session=s, limit=10)
+                    for st in steps:
+                        for b in st.blocks:
+                            txt = getattr(b, "text", "") or getattr(b, "content", "")
+                            if clean_id_lower in txt.lower():
+                                return ad, s
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
+    h_msg = f" for harness '{harness}'" if harness else " across all harnesses"
     raise ValueError(
-        f"Session '{session_id}' not found for harness '{harness}' (checked {len(sessions)} discovered sessions)"
+        f"Session '{session_id}' not found{h_msg}."
     )
 
 
@@ -59,8 +157,6 @@ def codetalk_list(
     root_path: str | None = None,
 ) -> str:
     """List session shells (metadata only, fast)."""
-    # If harness is specified, query only that harness (resolved to canonical)
-    # If not specified, query each canonical adapter ONCE to avoid duplicate listings across aliases
     if harness:
         harnesses = [harness]
     else:
@@ -143,16 +239,16 @@ def codetalk_list(
 
 @server.tool(
     name="codetalk_read",
-    description="Read and normalize transcript steps for a specific session thread.",
+    description="Read and normalize transcript steps for a specific session thread. Harness is optional.",
 )
 def codetalk_read(
     session_id: str,
-    harness: str,
+    harness: str | None = None,
     since: str | None = None,
     until: str | None = None,
     since_last_user_input: bool = False,
     include_thinking: bool = True,
-    limit: int | None = None,
+    limit: int = 30,
     root_path: str | None = None,
 ) -> str:
     """Read normalized steps for a given session."""
@@ -163,7 +259,7 @@ def codetalk_read(
         until=until,
         since_last_user_input=since_last_user_input,
         include_thinking=include_thinking,
-        limit=limit,
+        limit=limit if limit and limit > 0 else 30,
     )
 
     return json.dumps(
@@ -193,7 +289,7 @@ def codetalk_read(
 )
 def codetalk_filter(
     session_id: str,
-    harness: str,
+    harness: str | None = None,
     keywords: list[str] | None = None,
     step_types: list[str] | None = None,
     actor_roles: list[str] | None = None,
@@ -353,24 +449,17 @@ def codetalk_search(
                                         "harness": h,
                                         "session_id": sess.session_id,
                                         "display_name": sess.display_name,
-                                        "step_index": s.step_index,
-                                        "actor_role": s.actor.role.value,
-                                        "block_type": (
-                                            b.type.value
-                                            if hasattr(b.type, "value")
-                                            else str(b.type)
-                                        ),
-                                        "preview": f"...{preview}...",
+                                        "match_type": "content",
+                                        "preview": preview,
                                         "timestamp": s.timestamp,
                                     }
                                 )
-                                if len(matches) >= limit:
-                                    break
+                                break
                         if len(matches) >= limit:
                             break
                 except Exception as e:
                     logger.debug(
-                        f"Error loading steps for search in session '{sess.session_id}': {e}"
+                        f"Error reading steps for session {sess.session_id}: {e}"
                     )
                     continue
 
@@ -389,7 +478,7 @@ def codetalk_search(
     description="Get metadata for a specific session without loading step bodies.",
 )
 def codetalk_info(
-    session_id: str, harness: str, root_path: str | None = None
+    session_id: str, harness: str | None = None, root_path: str | None = None
 ) -> str:
     """Get metadata for a session."""
     _, session = _find_session(session_id, harness, root_path=root_path)
@@ -402,15 +491,17 @@ def codetalk_info(
 )
 def codetalk_branches(
     conversation_id: str,
-    harness: str,
+    harness: str | None = None,
     root_path: str | None = None,
 ) -> str:
     """Get the full DAG branch hierarchy for a conversation."""
-    adapter = _get_adapter(harness)
-    tree = adapter.get_branch_tree(conversation_id=conversation_id, root_path=root_path)
+    adapter, _ = _find_session(conversation_id, harness, root_path=root_path)
+    tree = adapter.get_branch_tree(
+        conversation_id=conversation_id, root_path=root_path
+    )
     if not tree:
         raise ValueError(
-            f"No conversation or branches found for conversation_id='{conversation_id}' in harness='{harness}'"
+            f"No conversation or branches found for conversation_id='{conversation_id}' (harness='{harness}')"
         )
     return json.dumps(tree.model_dump(mode="json", exclude_none=True), indent=2)
 
@@ -423,11 +514,11 @@ def codetalk_diff_branches(
     conversation_id: str,
     branch_a: str,
     branch_b: str,
-    harness: str,
+    harness: str | None = None,
     root_path: str | None = None,
 ) -> str:
     """Compare two branches of a conversation."""
-    adapter = _get_adapter(harness)
+    adapter, _ = _find_session(conversation_id, harness, root_path=root_path)
     diff = adapter.diff_branches(
         conversation_id=conversation_id,
         branch_a=branch_a,
@@ -441,13 +532,14 @@ def codetalk_diff_branches(
     return json.dumps(diff.model_dump(mode="json", exclude_none=True), indent=2)
 
 
-
 # ─── Entrypoint ───────────────────────────────────────────────────────────────
 
 
 @click.command()
 @click.option("--transport", default="stdio", help="MCP transport mode (stdio)")
-@click.option("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
+@click.option(
+    "--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)"
+)
 def main(transport: str, log_level: str) -> None:
     """CodeTalker MCP server entrypoint."""
     logging.basicConfig(
