@@ -26,6 +26,7 @@ from codetalker.schema import (
     ToolCallBlock,
     ToolResultBlock,
 )
+from codetalker.utils.paths import normalize_working_directory
 from codetalker.utils.timestamps import normalize_timestamp
 
 
@@ -115,7 +116,7 @@ class FreebuffAdapter(BaseAdapter):
                     branch_label="Forked Thread" if fork_src else "Main Thread",
                     started_at=started_at,
                     last_activity=last_activity,
-                    working_directory=ppath,
+                    working_directory=normalize_working_directory(ppath),
                     model=model or f"Freebuff ({agent_mode})",
                     step_count=total_steps,
                     user_turn_count=user_turns,

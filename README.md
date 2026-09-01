@@ -57,14 +57,15 @@ CodeTalker is an agent-callable tool and MCP server that normalizes conversation
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `codetalk_capabilities` | _(none)_ | List harnesses, aliases, ID guidance, and recommended read defaults. Call once per agent session. |
-| `codetalk_list` | `harness`, `conversation_id`, `since`, `limit`, `root_path`, `include_capabilities`, `include_harness_status` | List sessions (slim by default). Returns `harness_status` when listing all harnesses. |
-| `codetalk_read` | `session_id`, `harness`, `since`, `until`, `since_last_user_input`, `conversation_only`, `exclude_actor_roles`, `include_thinking`, `include_raw_data`, `max_step_chars`, `offset`, `from_end`, `limit`, `root_path` | Read normalized steps. Defaults: tail slice (`from_end=true`), conversation-only (`conversation_only=true`), no raw payloads (`include_raw_data=false`). |
+| `codetalk_capabilities` | _(none)_ | List harnesses, aliases, ID guidance, context-recovery playbook, and recommended read defaults. Call once per agent session. |
+| `codetalk_list` | `harness`, `conversation_id`, `working_directory`, `since`, `limit`, `root_path`, `include_capabilities`, `include_harness_status` | List sessions (slim by default). Filter by `working_directory` for project-scoped recovery. |
+| `codetalk_resolve_session` | `working_directory`, `harness`, `root_path`, `limit` | Resolve the most recent session for a project path when `session_id` is unknown (common Freebuff context-loss recovery). |
+| `codetalk_read` | `session_id`, `harness`, `working_directory`, `since`, `until`, `since_last_user_input`, `conversation_only`, `exclude_actor_roles`, `include_thinking`, `include_raw_data`, `max_step_chars`, `offset`, `from_end`, `limit`, `root_path` | Read normalized steps. Provide `session_id` **or** `working_directory`. Defaults: tail slice (`from_end=true`), conversation-only (`conversation_only=true`), no raw payloads (`include_raw_data=false`). |
 | `codetalk_branches` | `conversation_id`, `harness`, `root_path` | DAG branch tree, fork points, and subagent hierarchy (`branch_id` usually equals `session_id`). |
 | `codetalk_diff_branches` | `conversation_id`, `branch_a`, `branch_b`, `harness`, `summary_only`, `include_raw_data`, `limit_per_branch`, `from_end`, `root_path` | Compare branches. Defaults to `summary_only=true` (counts/metadata only). |
-| `codetalk_filter` | `session_id`, `harness`, `keywords`, `step_types`, `actor_roles`, `conversation_only`, `exclude_actor_roles`, `since_last_user_input`, `include_thinking`, `include_raw_data`, `max_step_chars`, `offset`, `from_end`, `limit`, `root_path` | Filter steps by keywords, types, or roles. |
+| `codetalk_filter` | `session_id`, `harness`, `working_directory`, `keywords`, `step_types`, `actor_roles`, `conversation_only`, `exclude_actor_roles`, `since_last_user_input`, `include_thinking`, `include_raw_data`, `max_step_chars`, `offset`, `from_end`, `limit`, `root_path` | Filter steps by keywords, types, or roles. Accepts `session_id` or `working_directory`. |
 | `codetalk_search` | `query`, `harness`, `since`, `limit`, `max_sessions_to_search`, `root_path` | Search titles and recent transcript tails (includes `step_index`). |
-| `codetalk_info` | `session_id`, `harness`, `root_path` | Fast metadata without step bodies (refreshes step counts when possible). |
+| `codetalk_info` | `session_id`, `harness`, `working_directory`, `root_path` | Fast metadata without step bodies (refreshes step counts when possible). Accepts `session_id` or `working_directory`. |
 
 ### Agent quickstart
 
@@ -74,6 +75,23 @@ CodeTalker is an agent-callable tool and MCP server that normalizes conversation
 4. `codetalk_branches` when `has_dag=true` on a listed session.
 
 Note: Codex CLI rollouts appear under harness `chatgpt`; use `session_id` for reads and `conversation_id` for branch tools.
+
+### Context recovery (Freebuff-first)
+
+Some harnesses lose **in-flight prompt context** while the **full transcript remains on disk**. Freebuff is the most common case: the agent may reply with *"I can't see the session context…"* even though `desktop-v2.db` still has every turn.
+
+**Symptom → fix**
+
+1. User says *continue* but the Freebuff agent is blind.
+2. Call `codetalk_resolve_session(working_directory="<project path>", harness="freebuff")` to get the latest `session_id` for that repo.
+3. Call `codetalk_read(working_directory="<project path>", harness="freebuff", since_last_user_input=true)` — or pass the resolved `session_id` — to recover what the user last asked and what the agent already did.
+4. Optionally `codetalk_search(query="can't see the session context", harness="freebuff")` to find other threads that hit the same failure.
+
+`working_directory` accepts plain paths (`C:/path/to/myproject`) or `file://` URIs. Matching is normalized and case-insensitive on Windows. You do **not** need `session_id` when you know the project path — `codetalk_read` and `codetalk_info` accept `working_directory` directly.
+
+Cross-harness recovery works too: open any harness with CodeTalker MCP configured (e.g. Cursor), point it at the Freebuff `working_directory`, and read the persisted transcript from there.
+
+`codetalk_capabilities` returns the full recovery playbook in `context_recovery`.
 
 ---
 

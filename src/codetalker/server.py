@@ -11,6 +11,7 @@ from mcp.server.mcpserver import MCPServer
 import codetalker.adapters  # noqa: F401
 from codetalker.registry import registry
 from codetalker.schema import ActorRole, BlockType, NormalizedSession, NormalizedStep
+from codetalker.utils.paths import normalize_working_directory, working_directories_match
 
 logger = logging.getLogger("codetalker.server")
 
@@ -22,12 +23,36 @@ HARNESS_NOTES: dict[str, str] = {
     "chatgpt": "Includes OpenAI Codex CLI rollouts and ChatGPT exports; alias: codex.",
     "cursor": "Reads Cursor Composer sessions from state.vscdb.",
     "antigravity": "Supports subagent branches and DAG fork points.",
-    "freebuff": "Full multi-turn logs from Freebuff desktop SQLite.",
+    "freebuff": (
+        "Full multi-turn logs from Freebuff desktop SQLite. "
+        "Use codetalk_resolve_session when the in-thread agent lost context."
+    ),
     "opencode": "OpenCode CLI JSONL has full transcripts; desktop drafts are prompt-only.",
     "windsurf": "Devin/Windsurf Cascade protobuf chat state.",
     "claude": "Fixture-tested; requires ~/.claude/projects sessions locally.",
     "aider": "Fixture-tested; reads markdown chat history files.",
     "copilot": "VS Code Copilot Chat session JSONL logs.",
+}
+
+CONTEXT_RECOVERY_PLAYBOOK: dict[str, Any] = {
+    "problem": (
+        "Some harnesses (especially Freebuff) can lose in-flight prompt context while "
+        "the full transcript remains on disk."
+    ),
+    "symptoms": [
+        "Assistant says it cannot see session context and asks to continue blindly.",
+        "User says 'continue' but the agent has no memory of prior turns.",
+    ],
+    "recommended_flow": [
+        "codetalk_resolve_session(working_directory='<project path>', harness='freebuff')",
+        "codetalk_read(working_directory='<project path>', harness='freebuff', since_last_user_input=true)",
+        "codetalk_search(query=\"can't see the session context\", harness='freebuff') to find affected threads",
+    ],
+    "notes": [
+        "working_directory accepts plain paths or file:// URIs; matching is case-insensitive on Windows.",
+        "codetalk_read accepts working_directory instead of session_id for one-shot recovery.",
+        "Prefer since_last_user_input=true when the user just said 'continue'.",
+    ],
 }
 
 FIXTURE_TESTED_HARNESSES = frozenset({"claude", "aider", "copilot"})
@@ -258,6 +283,66 @@ def _find_session(
     raise ValueError(f"Session '{session_id}' not found{h_msg}.")
 
 
+def _sessions_for_working_directory(
+    working_directory: str,
+    harness: str | None = None,
+    root_path: str | None = None,
+) -> list[NormalizedSession]:
+    all_sessions, _ = _discover_all_sessions(harness, root_path)
+    matches = [
+        s
+        for s in all_sessions
+        if working_directories_match(s.working_directory, working_directory)
+    ]
+    matches.sort(
+        key=lambda s: (
+            s.last_activity or s.started_at or "",
+            1 if s.branch_root_step_id else 0,
+        ),
+        reverse=True,
+    )
+    return matches
+
+
+def _adapter_for_session(session: NormalizedSession) -> Any:
+    adapter = registry.get(session.harness)
+    if not adapter:
+        raise ValueError(f"No adapter registered for harness '{session.harness}'.")
+    return adapter
+
+
+def _resolve_session_by_working_directory(
+    working_directory: str,
+    harness: str | None = None,
+    root_path: str | None = None,
+) -> tuple[Any, NormalizedSession]:
+    matches = _sessions_for_working_directory(working_directory, harness, root_path)
+    if not matches:
+        h_msg = f" for harness '{harness}'" if harness else ""
+        normalized = normalize_working_directory(working_directory)
+        raise ValueError(
+            f"No session found for working_directory='{working_directory}'"
+            f"{h_msg}. Normalized query: '{normalized}'."
+        )
+    session = matches[0]
+    return _adapter_for_session(session), session
+
+
+def _resolve_session_ref(
+    session_id: str | None,
+    harness: str | None = None,
+    root_path: str | None = None,
+    working_directory: str | None = None,
+) -> tuple[Any, NormalizedSession]:
+    if session_id and session_id.strip():
+        return _find_session(session_id, harness, root_path=root_path)
+    if working_directory and working_directory.strip():
+        return _resolve_session_by_working_directory(
+            working_directory, harness, root_path=root_path
+        )
+    raise ValueError("Provide session_id or working_directory.")
+
+
 def _discover_all_sessions(
     harness: str | None,
     root_path: str | None,
@@ -332,12 +417,17 @@ def codetalk_capabilities() -> str:
         "harness_notes": HARNESS_NOTES,
         "id_guidance": {
             "session_id": "Use for codetalk_read, codetalk_filter, codetalk_info.",
+            "working_directory": (
+                "Use with codetalk_resolve_session or pass to codetalk_read instead of "
+                "session_id when the agent lost in-harness context."
+            ),
             "conversation_id": (
                 "Use for codetalk_branches and codetalk_diff_branches. "
                 "Codex rollouts may use a prefixed conversation_id distinct from session_id."
             ),
             "branch_id": "Usually equals session_id for branch threads.",
         },
+        "context_recovery": CONTEXT_RECOVERY_PLAYBOOK,
         "recommended_read_defaults": {
             "from_end": True,
             "conversation_only": True,
@@ -355,6 +445,7 @@ def codetalk_capabilities() -> str:
 def codetalk_list(
     harness: str | None = None,
     conversation_id: str | None = None,
+    working_directory: str | None = None,
     since: str | None = None,
     limit: int = 50,
     root_path: str | None = None,
@@ -369,6 +460,13 @@ def codetalk_list(
             s
             for s in all_sessions
             if s.conversation_id == conversation_id or s.session_id == conversation_id
+        ]
+
+    if working_directory:
+        all_sessions = [
+            s
+            for s in all_sessions
+            if working_directories_match(s.working_directory, working_directory)
         ]
 
     if since:
@@ -397,16 +495,59 @@ def codetalk_list(
 
 
 @server.tool(
+    name="codetalk_resolve_session",
+    description=(
+        "Resolve the most recent session for a project working_directory. "
+        "Use when an in-harness agent lost context and does not know session_id "
+        "(common with Freebuff)."
+    ),
+)
+def codetalk_resolve_session(
+    working_directory: str,
+    harness: str | None = None,
+    root_path: str | None = None,
+    limit: int = 5,
+) -> str:
+    """Resolve the latest session for a workspace path."""
+    matches = _sessions_for_working_directory(working_directory, harness, root_path)
+    if not matches:
+        h_msg = f" for harness '{harness}'" if harness else ""
+        normalized = normalize_working_directory(working_directory)
+        raise ValueError(
+            f"No session found for working_directory='{working_directory}'"
+            f"{h_msg}. Normalized query: '{normalized}'."
+        )
+
+    primary = matches[0]
+    alternates = matches[1 : max(limit, 1)] if limit > 0 else []
+
+    payload: dict[str, Any] = {
+        "resolved": True,
+        "working_directory_query": working_directory,
+        "normalized_working_directory": normalize_working_directory(working_directory),
+        "session": _session_summary(primary),
+        "match_count": len(matches),
+        "alternate_sessions": [_session_summary(s) for s in alternates],
+        "recovery_hint": (
+            "Call codetalk_read with session_id from session, or pass the same "
+            "working_directory to codetalk_read (optionally since_last_user_input=true)."
+        ),
+    }
+    return json.dumps(payload, indent=2)
+
+
+@server.tool(
     name="codetalk_read",
     description=(
         "Read normalized transcript steps for a session thread. "
         "Defaults return the most recent conversation turns (from_end=true). "
-        "Use session_id; harness is optional."
+        "Provide session_id, or working_directory when session_id is unknown."
     ),
 )
 def codetalk_read(
-    session_id: str,
+    session_id: str = "",
     harness: str | None = None,
+    working_directory: str | None = None,
     since: str | None = None,
     until: str | None = None,
     since_last_user_input: bool = False,
@@ -421,7 +562,12 @@ def codetalk_read(
     root_path: str | None = None,
 ) -> str:
     """Read normalized steps for a given session."""
-    adapter, session = _find_session(session_id, harness, root_path=root_path)
+    adapter, session = _resolve_session_ref(
+        session_id=session_id,
+        harness=harness,
+        root_path=root_path,
+        working_directory=working_directory,
+    )
     excluded = _resolve_exclude_roles(conversation_only, exclude_actor_roles)
 
     steps, pagination = adapter.load_steps_paginated(
@@ -478,8 +624,9 @@ def codetalk_read(
     description="Filter steps in a session by keywords, step types, or actor roles.",
 )
 def codetalk_filter(
-    session_id: str,
+    session_id: str = "",
     harness: str | None = None,
+    working_directory: str | None = None,
     keywords: list[str] | None = None,
     step_types: list[str] | None = None,
     actor_roles: list[str] | None = None,
@@ -495,7 +642,12 @@ def codetalk_filter(
     root_path: str | None = None,
 ) -> str:
     """Filter steps in a session."""
-    adapter, session = _find_session(session_id, harness, root_path=root_path)
+    adapter, session = _resolve_session_ref(
+        session_id=session_id,
+        harness=harness,
+        root_path=root_path,
+        working_directory=working_directory,
+    )
 
     parsed_step_types: list[BlockType] | None = None
     if step_types:
@@ -680,10 +832,18 @@ def codetalk_search(
     description="Get metadata for a specific session without loading step bodies.",
 )
 def codetalk_info(
-    session_id: str, harness: str | None = None, root_path: str | None = None
+    session_id: str = "",
+    harness: str | None = None,
+    working_directory: str | None = None,
+    root_path: str | None = None,
 ) -> str:
     """Get metadata for a session."""
-    adapter, session = _find_session(session_id, harness, root_path=root_path)
+    adapter, session = _resolve_session_ref(
+        session_id=session_id,
+        harness=harness,
+        root_path=root_path,
+        working_directory=working_directory,
+    )
     try:
         session.step_count = adapter.count_steps(session)
     except Exception:
