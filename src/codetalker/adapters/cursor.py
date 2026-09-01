@@ -27,6 +27,8 @@ from codetalker.schema import (
     ToolResultBlock,
 )
 from codetalker.utils.timestamps import normalize_timestamp
+from codetalker.utils.paths import normalize_working_directory
+from codetalker.utils.display import clip_display_name
 
 
 class CursorAdapter(BaseAdapter):
@@ -73,6 +75,40 @@ class CursorAdapter(BaseAdapter):
         unique_sessions.sort(key=lambda s: s.last_activity or "", reverse=True)
         return unique_sessions
 
+    def count_steps(self, session: NormalizedSession) -> int:
+        stats = self._peek_composer_stats(session.session_id, session.source_path)
+        if stats:
+            return stats[0]
+        return len(self._load_composer_steps(session))
+
+    @staticmethod
+    def _peek_composer_stats(
+        composer_id: str, source_path: str
+    ) -> tuple[int, int, int] | None:
+        """Return (step_count, user_turns, assistant_turns) from composer headers only."""
+        global_db = os.path.expanduser("~/AppData/Roaming/Cursor/User/globalStorage/state.vscdb")
+        db_to_use = source_path if os.path.isfile(source_path) else global_db
+        if not os.path.isfile(db_to_use):
+            return None
+        try:
+            conn = sqlite3.connect(f"file:{db_to_use}?mode=ro", uri=True)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT value FROM cursorDiskKV WHERE key = ? OR key = ?",
+                (f"composerData:{composer_id}", f"composerData:task-{composer_id}"),
+            )
+            row = cursor.fetchone()
+            conn.close()
+            if not row:
+                return None
+            cdata = json.loads(row[0])
+            headers = cdata.get("fullConversationHeadersOnly") or []
+            user_turns = sum(1 for h in headers if h.get("type") == 1)
+            assistant_turns = sum(1 for h in headers if h.get("type") == 2)
+            return len(headers), user_turns, assistant_turns
+        except Exception:
+            return None
+
     def _discover_from_global_db(self, db_path: str) -> list[NormalizedSession]:
         sessions: list[NormalizedSession] = []
         try:
@@ -91,7 +127,9 @@ class CursorAdapter(BaseAdapter):
                     display_name: str | None = None
                     cwd: str | None = None
                     model: str | None = None
-                    step_count: int = 0
+                    step_count = 0
+                    user_turn_count = 0
+                    assistant_turn_count = 0
                     mode: str | None = None
 
                     if header_raw:
@@ -109,6 +147,11 @@ class CursorAdapter(BaseAdapter):
                     if not display_name:
                         display_name = f"Cursor Composer {cid[:8]}"
 
+                    display_name, truncated = clip_display_name(display_name)
+                    stats = self._peek_composer_stats(cid, db_path)
+                    if stats:
+                        step_count, user_turn_count, assistant_turn_count = stats
+
                     started_at = normalize_timestamp(created_at)
                     last_activity = normalize_timestamp(updated_at or created_at)
 
@@ -123,12 +166,15 @@ class CursorAdapter(BaseAdapter):
                         branch_label="Main Thread",
                         started_at=started_at,
                         last_activity=last_activity,
-                        working_directory=cwd,
+                        working_directory=normalize_working_directory(cwd),
                         model=model_name,
                         step_count=step_count,
+                        user_turn_count=user_turn_count,
+                        assistant_turn_count=assistant_turn_count,
                         source_path=db_path,
                         source_format="sqlite",
                         has_dag=False,
+                        display_name_truncated=truncated,
                     )
                     sessions.append(sess)
 
@@ -162,9 +208,14 @@ class CursorAdapter(BaseAdapter):
                     if not cid:
                         continue
                     title = comp.get("name") or comp.get("subtitle") or f"Cursor Session {cid[:8]}"
+                    title, truncated = clip_display_name(title)
                     created_at = normalize_timestamp(comp.get("createdAt"))
                     last_act = normalize_timestamp(comp.get("lastUpdatedAt")) or created_at
                     mode = comp.get("unifiedMode")
+                    stats = self._peek_composer_stats(cid, db_path)
+                    step_count = stats[0] if stats else 0
+                    user_turn_count = stats[1] if stats else 0
+                    assistant_turn_count = stats[2] if stats else 0
                     sess = NormalizedSession(
                         session_id=cid,
                         harness="cursor",
@@ -172,11 +223,15 @@ class CursorAdapter(BaseAdapter):
                         conversation_id=cid,
                         started_at=created_at,
                         last_activity=last_act,
-                        working_directory=ws_folder,
+                        working_directory=normalize_working_directory(ws_folder),
                         model=f"Cursor ({mode})" if mode else "Cursor Composer",
+                        step_count=step_count,
+                        user_turn_count=user_turn_count,
+                        assistant_turn_count=assistant_turn_count,
                         source_path=db_path,
                         source_format="sqlite",
                         has_dag=False,
+                        display_name_truncated=truncated,
                     )
                     sessions.append(sess)
             conn.close()
@@ -201,8 +256,12 @@ class CursorAdapter(BaseAdapter):
         since_last_user_input: bool = False,
         include_step_types: list[BlockType] | None = None,
         include_actor_roles: list[ActorRole] | None = None,
+        exclude_actor_roles: list[ActorRole] | None = None,
         include_thinking: bool = True,
-        include_raw_data: bool = True,
+        include_raw_data: bool = False,
+        max_step_chars: int | None = None,
+        offset: int = 0,
+        from_end: bool = False,
         limit: int | None = None,
     ) -> list[NormalizedStep]:
         raw_steps = self._load_composer_steps(session)
@@ -214,8 +273,12 @@ class CursorAdapter(BaseAdapter):
             since_last_user_input=since_last_user_input,
             include_step_types=include_step_types,
             include_actor_roles=include_actor_roles,
+            exclude_actor_roles=exclude_actor_roles,
             include_thinking=include_thinking,
             include_raw_data=include_raw_data,
+            max_step_chars=max_step_chars,
+            offset=offset,
+            from_end=from_end,
             limit=limit,
         )
 
@@ -311,7 +374,15 @@ class CursorAdapter(BaseAdapter):
                     role = ActorRole.ASSISTANT
                     # 1. Check for thinking
                     if grouping.get("hasThinking") or (bubble_data and bubble_data.get("thinking")):
-                        thinking_text = (bubble_data.get("thinking") if bubble_data else None) or f"Thinking ({grouping.get('thinkingDurationMs', 0)}ms)"
+                        thinking_raw = (bubble_data.get("thinking") if bubble_data else None) or f"Thinking ({grouping.get('thinkingDurationMs', 0)}ms)"
+                        thinking_text = thinking_raw
+                        if isinstance(thinking_raw, str) and thinking_raw.strip().startswith("{"):
+                            try:
+                                parsed = json.loads(thinking_raw)
+                                if isinstance(parsed, dict) and parsed.get("text"):
+                                    thinking_text = str(parsed["text"])
+                            except Exception:
+                                pass
                         blocks.append(ThinkingBlock(text=thinking_text))
 
                     # 2. Check for assistant text

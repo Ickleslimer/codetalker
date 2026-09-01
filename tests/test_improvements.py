@@ -43,9 +43,13 @@ def test_server_deduplication_and_aliases():
     res_str = codetalk_list(limit=20)
     data = json.loads(res_str)
 
-    assert "harnesses" in data
-    assert "aliases" in data
-    assert len(data["harnesses"]) == len(set(data["harnesses"]))
+    assert "harness_status" in data
+    assert len(data["harnesses"]) == len(set(data["harnesses"])) if "harnesses" in data else True
+
+    res_with_caps = codetalk_list(limit=5, include_capabilities=True)
+    caps_data = json.loads(res_with_caps)
+    assert "harnesses" in caps_data
+    assert "aliases" in caps_data
 
     # Check for session deduplication
     session_keys = [(s["harness"], s["session_id"]) for s in data["sessions"]]

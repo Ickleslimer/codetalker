@@ -24,6 +24,9 @@ from codetalker.schema import (
     TextBlock,
 )
 from codetalker.utils.timestamps import normalize_timestamp
+from codetalker.utils.paths import normalize_working_directory
+from codetalker.utils.display import clip_display_name
+from codetalker.utils.sanitize import sanitize_protobuf_text
 
 
 def _decode_protobuf_wire(data: bytes) -> list[tuple[int, str, Any]]:
@@ -247,7 +250,9 @@ class WindsurfAdapter(BaseAdapter):
                 started_at = last_activity
 
             session_id = filename.replace(".pb", "")
-            display_name = first_user_prompt[:50].strip() if first_user_prompt else None
+            display_name, truncated = clip_display_name(
+                first_user_prompt.strip() if first_user_prompt else None
+            )
             if not display_name and cwd:
                 display_name = f"Devin Chat · {os.path.basename(cwd)}"
             if not display_name:
@@ -258,9 +263,10 @@ class WindsurfAdapter(BaseAdapter):
                 harness="windsurf",
                 display_name=display_name,
                 conversation_id=session_id,
+                branch_label="Main Thread",
                 started_at=started_at,
                 last_activity=last_activity,
-                working_directory=cwd,
+                working_directory=normalize_working_directory(cwd),
                 model="Devin (Windsurf Cascade)",
                 step_count=total_steps,
                 user_turn_count=user_turn_count,
@@ -268,6 +274,7 @@ class WindsurfAdapter(BaseAdapter):
                 source_path=pb_path,
                 source_format="protobuf",
                 has_dag=False,
+                display_name_truncated=truncated,
             )
         except Exception:
             return None
@@ -353,8 +360,12 @@ class WindsurfAdapter(BaseAdapter):
         since_last_user_input: bool = False,
         include_step_types: list[BlockType] | None = None,
         include_actor_roles: list[ActorRole] | None = None,
+        exclude_actor_roles: list[ActorRole] | None = None,
         include_thinking: bool = True,
-        include_raw_data: bool = True,
+        include_raw_data: bool = False,
+        max_step_chars: int | None = None,
+        offset: int = 0,
+        from_end: bool = False,
         limit: int | None = None,
     ) -> list[NormalizedStep]:
         if session.source_format == "protobuf":
@@ -371,8 +382,12 @@ class WindsurfAdapter(BaseAdapter):
             since_last_user_input=since_last_user_input,
             include_step_types=include_step_types,
             include_actor_roles=include_actor_roles,
+            exclude_actor_roles=exclude_actor_roles,
             include_thinking=include_thinking,
             include_raw_data=include_raw_data,
+            max_step_chars=max_step_chars,
+            offset=offset,
+            from_end=from_end,
             limit=limit,
         )
 
@@ -429,7 +444,7 @@ class WindsurfAdapter(BaseAdapter):
 
                     prompt_text = "\n".join(user_texts).strip()
                     if prompt_text:
-                        blocks.append(TextBlock(text=prompt_text))
+                        blocks.append(TextBlock(text=sanitize_protobuf_text(prompt_text)))
                     for att in attachments:
                         blocks.append(att)
 
@@ -467,7 +482,7 @@ class WindsurfAdapter(BaseAdapter):
 
                     response_text = "\n".join(bot_texts).strip()
                     if response_text:
-                        blocks.append(TextBlock(text=response_text))
+                        blocks.append(TextBlock(text=sanitize_protobuf_text(response_text)))
                     for cf in context_files:
                         blocks.append(AttachmentBlock(attachment_type="file", url=cf))
 

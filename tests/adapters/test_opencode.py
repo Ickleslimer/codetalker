@@ -12,7 +12,7 @@ def test_opencode_adapter_discovery_and_read():
     if sessions:
         sess = sessions[0]
         assert sess.harness == "opencode"
-        assert sess.source_format in ("sqlite", "jsonl")
+        assert sess.source_format in ("sqlite", "jsonl", "opencode_desktop_draft")
 
         steps = adapter.load_steps(sess)
         assert isinstance(steps, list)

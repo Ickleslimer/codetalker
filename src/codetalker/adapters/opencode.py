@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import glob
+import hashlib
 import json
 import logging
 import os
@@ -10,8 +11,28 @@ from pathlib import Path
 from typing import Any
 
 from codetalker.adapter_base import BaseAdapter
+from codetalker.schema import (
+    Actor,
+    ActorRole,
+    BlockType,
+    ContentBlock,
+    NormalizedSession,
+    NormalizedStep,
+    TextBlock,
+    ThinkingBlock,
+    ToolCallBlock,
+    ToolResultBlock,
+)
+from codetalker.utils.display import clip_display_name
+from codetalker.utils.paths import normalize_working_directory
+from codetalker.utils.timestamps import normalize_timestamp
 
 logger = logging.getLogger("codetalker.adapters.opencode")
+
+DESKTOP_COVERAGE_WARNING = (
+    "OpenCode Desktop stores client-side prompt drafts only; "
+    "assistant replies and tool executions are not persisted locally."
+)
 
 
 def _decode_b64_path(b64_str: str) -> str | None:
@@ -24,46 +45,7 @@ def _decode_b64_path(b64_str: str) -> str | None:
 
 
 class OpenCodeAdapter(BaseAdapter):
-    """Adapter for OpenCode Desktop (ai.opencode.desktop) and OpenCode CLI agent sessions.
-
-    Storage Model Notes:
-    - **OpenCode CLI sessions**: Stored locally in `~/.opencode/sessions/*.jsonl` or
-      `~/.local/share/opencode/sessions/*.jsonl`, containing full multi-turn assistant
-      responses, tool calls, and reasoning steps.
-    - **OpenCode Desktop**: Stores prompt history, active session drafts, workspace paths,
-      and model configurations locally in `%APPDATA%/ai.opencode.desktop/drafts.sqlite`.
-      Note that desktop multi-turn LLM streams are rendered via server-side WebSockets, so
-      local SQLite records represent client-side prompt inputs and active workspace drafts.
-    """
-
-    harness_name: str = "opencode"
-from codetalker.schema import (
-    Actor,
-    ActorRole,
-    AttachmentBlock,
-    BlockType,
-    ContentBlock,
-    NormalizedSession,
-    NormalizedStep,
-    SystemEventBlock,
-    TextBlock,
-    ThinkingBlock,
-    ToolCallBlock,
-    ToolResultBlock,
-)
-from codetalker.utils.timestamps import normalize_timestamp
-
-
-def _decode_b64_path(b64_str: str) -> str | None:
-    try:
-        padded = b64_str + "=" * ((4 - len(b64_str) % 4) % 4)
-        return base64.b64decode(padded).decode("utf-8", errors="ignore")
-    except Exception:
-        return None
-
-
-class OpenCodeAdapter(BaseAdapter):
-    """Adapter for OpenCode Desktop (ai.opencode.desktop) and OpenCode CLI agent sessions."""
+    """Adapter for OpenCode Desktop and OpenCode CLI agent sessions."""
 
     harness_name: str = "opencode"
 
@@ -91,13 +73,10 @@ class OpenCodeAdapter(BaseAdapter):
                         sessions.append(sess)
                 return sessions
 
-        # Default paths to check:
-        # 1. Desktop drafts.sqlite: %APPDATA%/ai.opencode.desktop/drafts.sqlite
         desktop_db = os.path.expanduser("~/AppData/Roaming/ai.opencode.desktop/drafts.sqlite")
         if os.path.isfile(desktop_db):
             sessions.extend(self._discover_from_sqlite(desktop_db))
 
-        # 2. CLI sessions in ~/.opencode or ~/.local/share/opencode
         for base in (
             "~/.opencode/sessions",
             "~/.local/share/opencode/sessions",
@@ -110,9 +89,25 @@ class OpenCodeAdapter(BaseAdapter):
                     if sess:
                         sessions.append(sess)
 
-        # Sort descending by last_activity
         sessions.sort(key=lambda s: s.last_activity or "", reverse=True)
-        return sessions
+        return self._dedupe_desktop_drafts(sessions)
+
+    @staticmethod
+    def _dedupe_desktop_drafts(sessions: list[NormalizedSession]) -> list[NormalizedSession]:
+        seen: set[str] = set()
+        unique: list[NormalizedSession] = []
+        for sess in sessions:
+            if sess.source_format != "opencode_desktop_draft":
+                unique.append(sess)
+                continue
+            fingerprint = hashlib.sha1(
+                f"{sess.working_directory}|{sess.display_name}|{sess.started_at}".encode()
+            ).hexdigest()
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            unique.append(sess)
+        return unique
 
     def _discover_from_sqlite(self, db_path: str) -> list[NormalizedSession]:
         sessions: list[NormalizedSession] = []
@@ -134,10 +129,7 @@ class OpenCodeAdapter(BaseAdapter):
             cursor.execute("SELECT key, value FROM document")
             rows = cursor.fetchall()
 
-            # Group session keys
-            # e.g. opencode.workspace.RDpcQWdhcnRo.1qa9m3f.dat:session:ses_feac0d0d2ffeg10ObNUEZr68y8:prompt
             prompt_history_entries: list[dict[str, Any]] = []
-
             for key, val_str in rows:
                 if key == "opencode.global.dat:prompt-history":
                     try:
@@ -145,38 +137,46 @@ class OpenCodeAdapter(BaseAdapter):
                         prompt_history_entries = ph_data.get("entries", [])
                     except Exception:
                         pass
-                elif ":session:" in key:
-                    parts = key.split(":")
-                    ses_idx = parts.index("session") if "session" in parts else -1
-                    sid = parts[ses_idx + 1] if ses_idx != -1 and ses_idx + 1 < len(parts) else key
 
-                    # Decode workspace if present
-                    ws_path: str | None = None
-                    if "opencode.workspace." in key:
-                        ws_b64 = key.split("opencode.workspace.")[1].split(".")[0]
-                        ws_path = _decode_b64_path(ws_b64)
+            for key, val_str in rows:
+                if ":session:" not in key:
+                    continue
+                parts = key.split(":")
+                ses_idx = parts.index("session") if "session" in parts else -1
+                sid = parts[ses_idx + 1] if ses_idx != -1 and ses_idx + 1 < len(parts) else key
 
-                    model_name: str | None = None
-                    prompt_preview: str | None = None
-                    try:
-                        v_json = json.loads(val_str)
-                        model_info = v_json.get("model") or {}
-                        model_name = model_info.get("modelID") or model_info.get("providerID")
-                        prompts = v_json.get("prompt", [])
-                        if prompts and isinstance(prompts, list):
-                            prompt_preview = prompts[0].get("content")
-                    except Exception:
-                        pass
+                ws_path: str | None = None
+                if "opencode.workspace." in key:
+                    ws_b64 = key.split("opencode.workspace.")[1].split(".")[0]
+                    ws_path = _decode_b64_path(ws_b64)
 
-                    if not prompt_preview and prompt_history_entries:
-                        first_entry = prompt_history_entries[0]
-                        p_items = first_entry.get("prompt", [])
-                        if p_items:
-                            prompt_preview = p_items[0].get("content", "")[:50]
+                model_name: str | None = None
+                prompt_preview: str | None = None
+                session_prompt_count = 0
+                try:
+                    v_json = json.loads(val_str)
+                    model_info = v_json.get("model") or {}
+                    model_name = model_info.get("modelID") or model_info.get("providerID")
+                    prompts = v_json.get("prompt", [])
+                    if prompts and isinstance(prompts, list):
+                        session_prompt_count = len(prompts)
+                        prompt_preview = prompts[0].get("content")
+                except Exception:
+                    pass
 
-                    display_name = prompt_preview[:50].strip() if prompt_preview else f"OpenCode Session {sid[:8]}"
+                if not prompt_preview and prompt_history_entries:
+                    first_entry = prompt_history_entries[0]
+                    p_items = first_entry.get("prompt", [])
+                    if p_items:
+                        prompt_preview = p_items[0].get("content", "")
 
-                    sess = NormalizedSession(
+                display_name, truncated = clip_display_name(
+                    prompt_preview.strip() if prompt_preview else f"OpenCode Session {sid[:8]}"
+                )
+                user_turns = max(session_prompt_count, len(prompt_history_entries))
+
+                sessions.append(
+                    NormalizedSession(
                         session_id=sid,
                         harness="opencode",
                         display_name=display_name,
@@ -185,14 +185,18 @@ class OpenCodeAdapter(BaseAdapter):
                         branch_label="Main Thread",
                         started_at=last_activity,
                         last_activity=last_activity,
-                        working_directory=ws_path,
+                        working_directory=normalize_working_directory(ws_path),
                         model=model_name or "OpenCode Agent",
-                        step_count=max(len(prompt_history_entries), 1),
+                        step_count=user_turns,
+                        user_turn_count=user_turns,
+                        assistant_turn_count=0,
                         source_path=db_path,
-                        source_format="sqlite",
+                        source_format="opencode_desktop_draft",
                         has_dag=False,
+                        coverage_warning=DESKTOP_COVERAGE_WARNING,
+                        display_name_truncated=truncated,
                     )
-                    sessions.append(sess)
+                )
 
             conn.close()
         except Exception:
@@ -235,7 +239,9 @@ class OpenCodeAdapter(BaseAdapter):
                             if not display_name:
                                 content = data.get("content") or data.get("text")
                                 if isinstance(content, str):
-                                    display_name = content[:50].strip().replace("\n", " ")
+                                    display_name, _ = clip_display_name(
+                                        content.strip().replace("\n", " ")
+                                    )
                         elif role == "assistant":
                             assistant_turns += 1
                             if not model and data.get("model"):
@@ -269,8 +275,6 @@ class OpenCodeAdapter(BaseAdapter):
         except Exception:
             return None
 
-    # ─── Loading Steps ────────────────────────────────────────────────────────
-
     def load_steps(
         self,
         session: NormalizedSession,
@@ -279,11 +283,17 @@ class OpenCodeAdapter(BaseAdapter):
         since_last_user_input: bool = False,
         include_step_types: list[BlockType] | None = None,
         include_actor_roles: list[ActorRole] | None = None,
+        exclude_actor_roles: list[ActorRole] | None = None,
         include_thinking: bool = True,
-        include_raw_data: bool = True,
+        include_raw_data: bool = False,
+        max_step_chars: int | None = None,
+        offset: int = 0,
+        from_end: bool = False,
         limit: int | None = None,
     ) -> list[NormalizedStep]:
-        if session.source_format == "sqlite":
+        if session.source_format == "opencode_desktop_draft":
+            raw_steps = self._load_sqlite_steps(session)
+        elif session.source_format == "sqlite":
             raw_steps = self._load_sqlite_steps(session)
         else:
             raw_steps = self._load_jsonl_steps(session)
@@ -295,8 +305,12 @@ class OpenCodeAdapter(BaseAdapter):
             since_last_user_input=since_last_user_input,
             include_step_types=include_step_types,
             include_actor_roles=include_actor_roles,
+            exclude_actor_roles=exclude_actor_roles,
             include_thinking=include_thinking,
             include_raw_data=include_raw_data,
+            max_step_chars=max_step_chars,
+            offset=offset,
+            from_end=from_end,
             limit=limit,
         )
 
@@ -308,12 +322,10 @@ class OpenCodeAdapter(BaseAdapter):
         try:
             conn = sqlite3.connect(f"file:{session.source_path}?mode=ro", uri=True)
             cursor = conn.cursor()
-
             cursor.execute("SELECT key, value FROM document")
             rows = cursor.fetchall()
             step_idx = 0
 
-            # 1. Prompt history
             for key, val_str in rows:
                 if key == "opencode.global.dat:prompt-history":
                     try:
@@ -321,7 +333,9 @@ class OpenCodeAdapter(BaseAdapter):
                         entries = ph_data.get("entries", [])
                         for entry in entries:
                             prompts = entry.get("prompt", [])
-                            prompt_texts = [p.get("content", "") for p in prompts if isinstance(p, dict)]
+                            prompt_texts = [
+                                p.get("content", "") for p in prompts if isinstance(p, dict)
+                            ]
                             combined = "\n".join(prompt_texts).strip()
                             if combined:
                                 steps.append(
@@ -337,13 +351,16 @@ class OpenCodeAdapter(BaseAdapter):
                     except Exception:
                         pass
 
-            # 2. Session draft prompt
             for key, val_str in rows:
                 if session.session_id in key:
                     try:
                         v_json = json.loads(val_str)
                         prompts = v_json.get("prompt", [])
-                        prompt_texts = [p.get("content", "") for p in prompts if isinstance(p, dict) and p.get("content")]
+                        prompt_texts = [
+                            p.get("content", "")
+                            for p in prompts
+                            if isinstance(p, dict) and p.get("content")
+                        ]
                         combined = "\n".join(prompt_texts).strip()
                         if combined:
                             steps.append(
@@ -383,12 +400,17 @@ class OpenCodeAdapter(BaseAdapter):
 
                 ts = normalize_timestamp(data.get("timestamp") or data.get("created_at"))
                 role_str = data.get("role") or data.get("type") or "user"
-                role = ActorRole.USER if role_str == "user" else (ActorRole.ASSISTANT if role_str == "assistant" else ActorRole.SYSTEM)
+                role = (
+                    ActorRole.USER
+                    if role_str == "user"
+                    else ActorRole.ASSISTANT
+                    if role_str == "assistant"
+                    else ActorRole.SYSTEM
+                )
 
                 blocks: list[ContentBlock] = []
                 content = data.get("content") or data.get("text") or ""
 
-                # Check for thinking
                 if data.get("thinking"):
                     blocks.append(ThinkingBlock(text=data["thinking"]))
 
@@ -400,22 +422,33 @@ class OpenCodeAdapter(BaseAdapter):
                             if b.get("type") == "text":
                                 blocks.append(TextBlock(text=b.get("text", "")))
                             elif b.get("type") == "tool_use":
-                                blocks.append(ToolCallBlock(tool_name=b.get("name", "tool"), tool_args=b.get("input", {})))
+                                blocks.append(
+                                    ToolCallBlock(
+                                        tool_name=b.get("name", "tool"),
+                                        tool_args=b.get("input", {}),
+                                    )
+                                )
                             elif b.get("type") == "tool_result":
-                                blocks.append(ToolResultBlock(content=str(b.get("content", ""))))
+                                blocks.append(
+                                    ToolResultBlock(content=str(b.get("content", "")))
+                                )
 
                 if not blocks:
                     blocks.append(TextBlock(text=""))
 
-                step = NormalizedStep(
-                    step_index=step_idx,
-                    timestamp=ts or session.last_activity,
-                    actor=Actor(role=role, model=data.get("model") if role == ActorRole.ASSISTANT else None),
-                    blocks=blocks,
-                    raw_data=data,
-                    harness_step_type=f"opencode_{role_str}",
+                steps.append(
+                    NormalizedStep(
+                        step_index=step_idx,
+                        timestamp=ts or session.last_activity,
+                        actor=Actor(
+                            role=role,
+                            model=data.get("model") if role == ActorRole.ASSISTANT else None,
+                        ),
+                        blocks=blocks,
+                        raw_data=data,
+                        harness_step_type=f"opencode_{role_str}",
+                    )
                 )
-                steps.append(step)
                 step_idx += 1
 
         return steps

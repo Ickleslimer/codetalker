@@ -200,6 +200,19 @@ class ConversationBranchTree(BaseModel):
     has_dag: bool = False
 
 
+class StepPagination(BaseModel):
+    offset: int = 0
+    limit: int | None = None
+    from_end: bool = False
+    returned_step_count: int = 0
+    total_steps_available: int = 0
+    has_more_before: bool = False
+    has_more_after: bool = False
+    next_offset: int | None = None
+    start_step_index: int | None = None
+    end_step_index: int | None = None
+
+
 class BranchDiff(BaseModel):
     conversation_id: str
     harness: str
@@ -213,6 +226,7 @@ class BranchDiff(BaseModel):
     common_steps: list[NormalizedStep] = Field(default_factory=list)
     branch_a_distinct_steps: list[NormalizedStep] = Field(default_factory=list)
     branch_b_distinct_steps: list[NormalizedStep] = Field(default_factory=list)
+    summary_only: bool = False
 
 
 # ─── Session ──────────────────────────────────────────────────────────────────
@@ -249,3 +263,7 @@ class NormalizedSession(BaseModel):
     is_truncated: bool = False
     requires_reducer: bool = False
     has_dag: bool = False
+
+    coverage_warning: str | None = None
+    is_empty: bool = False
+    display_name_truncated: bool = False

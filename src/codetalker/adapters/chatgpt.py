@@ -425,8 +425,12 @@ class ChatGPTAdapter(BaseAdapter):
         since_last_user_input: bool = False,
         include_step_types: list[BlockType] | None = None,
         include_actor_roles: list[ActorRole] | None = None,
+        exclude_actor_roles: list[ActorRole] | None = None,
         include_thinking: bool = True,
-        include_raw_data: bool = True,
+        include_raw_data: bool = False,
+        max_step_chars: int | None = None,
+        offset: int = 0,
+        from_end: bool = False,
         limit: int | None = None,
     ) -> list[NormalizedStep]:
         if session.source_format == "codex_rollout":
@@ -445,8 +449,12 @@ class ChatGPTAdapter(BaseAdapter):
             since_last_user_input=since_last_user_input,
             include_step_types=include_step_types,
             include_actor_roles=include_actor_roles,
+            exclude_actor_roles=exclude_actor_roles,
             include_thinking=include_thinking,
             include_raw_data=include_raw_data,
+            max_step_chars=max_step_chars,
+            offset=offset,
+            from_end=from_end,
             limit=limit,
         )
 
@@ -665,7 +673,14 @@ class ChatGPTAdapter(BaseAdapter):
 
                     elif rtype == "message":
                         role_str = payload.get("role", "assistant")
-                        role = ActorRole.USER if role_str == "user" else ActorRole.ASSISTANT
+                        if role_str == "user":
+                            role = ActorRole.USER
+                        elif role_str in ("developer", "system"):
+                            role = ActorRole.SYSTEM
+                        elif role_str == "tool":
+                            role = ActorRole.TOOL
+                        else:
+                            role = ActorRole.ASSISTANT
                         content_list = payload.get("content") or []
                         text_parts: list[str] = []
                         for part in content_list:
@@ -674,13 +689,20 @@ class ChatGPTAdapter(BaseAdapter):
                             elif isinstance(part, str):
                                 text_parts.append(part)
                         blocks = [TextBlock(text="\n".join(text_parts))]
+                        harness_type = (
+                            "developer_message"
+                            if role_str == "developer"
+                            else "system_message"
+                            if role_str == "system"
+                            else "message"
+                        )
                         step = NormalizedStep(
                             step_index=step_idx,
                             timestamp=ts,
                             actor=Actor(role=role, model=current_model),
                             blocks=blocks,
                             raw_data=entry,
-                            harness_step_type="message",
+                            harness_step_type=harness_type,
                         )
                         steps.append(step)
                         step_idx += 1

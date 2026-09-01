@@ -47,6 +47,7 @@ def test_diff_branches():
         branch_b="conv-test-uuid-1234__branch_node-fork-1",
         harness="chatgpt",
         root_path=str(FIXTURES_DIR),
+        summary_only=False,
     )
     data = json.loads(res_str)
 

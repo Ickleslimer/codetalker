@@ -57,13 +57,23 @@ CodeTalker is an agent-callable tool and MCP server that normalizes conversation
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `codetalk_list` | `harness`, `conversation_id`, `since`, `limit`, `root_path` | List conversation sessions and branch threads across one or all coding harnesses (deduplicated across aliases). |
-| `codetalk_read` | `session_id`, `harness`, `since`, `until`, `since_last_user_input`, `include_thinking`, `limit`, `root_path` | Read and normalize transcript steps for a specific session thread. |
-| `codetalk_branches` | `conversation_id`, `harness`, `root_path` | Get the full DAG branch tree, fork points, variant counts, and subagent hierarchy for a conversation. |
-| `codetalk_diff_branches` | `conversation_id`, `branch_a`, `branch_b`, `harness`, `root_path` | Compare two branches of a conversation, returning shared ancestor steps, divergence point, and distinct steps. |
-| `codetalk_filter` | `session_id`, `harness`, `keywords`, `step_types`, `actor_roles`, `since_last_user_input`, `include_thinking`, `limit`, `root_path` | Filter steps in a session by keywords, step types, or actor roles. |
-| `codetalk_search` | `query`, `harness`, `since`, `limit`, `max_sessions_to_search`, `root_path` | Fast search across session titles and recent transcripts. |
-| `codetalk_info` | `session_id`, `harness`, `root_path` | Fast metadata retrieval for a session without loading step bodies. |
+| `codetalk_capabilities` | _(none)_ | List harnesses, aliases, ID guidance, and recommended read defaults. Call once per agent session. |
+| `codetalk_list` | `harness`, `conversation_id`, `since`, `limit`, `root_path`, `include_capabilities`, `include_harness_status` | List sessions (slim by default). Returns `harness_status` when listing all harnesses. |
+| `codetalk_read` | `session_id`, `harness`, `since`, `until`, `since_last_user_input`, `conversation_only`, `exclude_actor_roles`, `include_thinking`, `include_raw_data`, `max_step_chars`, `offset`, `from_end`, `limit`, `root_path` | Read normalized steps. Defaults: tail slice (`from_end=true`), conversation-only (`conversation_only=true`), no raw payloads (`include_raw_data=false`). |
+| `codetalk_branches` | `conversation_id`, `harness`, `root_path` | DAG branch tree, fork points, and subagent hierarchy (`branch_id` usually equals `session_id`). |
+| `codetalk_diff_branches` | `conversation_id`, `branch_a`, `branch_b`, `harness`, `summary_only`, `include_raw_data`, `limit_per_branch`, `from_end`, `root_path` | Compare branches. Defaults to `summary_only=true` (counts/metadata only). |
+| `codetalk_filter` | `session_id`, `harness`, `keywords`, `step_types`, `actor_roles`, `conversation_only`, `exclude_actor_roles`, `since_last_user_input`, `include_thinking`, `include_raw_data`, `max_step_chars`, `offset`, `from_end`, `limit`, `root_path` | Filter steps by keywords, types, or roles. |
+| `codetalk_search` | `query`, `harness`, `since`, `limit`, `max_sessions_to_search`, `root_path` | Search titles and recent transcript tails (includes `step_index`). |
+| `codetalk_info` | `session_id`, `harness`, `root_path` | Fast metadata without step bodies (refreshes step counts when possible). |
+
+### Agent quickstart
+
+1. `codetalk_capabilities` — learn harness names, aliases (`codex` → `chatgpt`), and ID fields.
+2. `codetalk_list` — find recent sessions (`harness_status` explains empty harnesses).
+3. `codetalk_read` with defaults — tail of conversation without system injections or `raw_data`.
+4. `codetalk_branches` when `has_dag=true` on a listed session.
+
+Note: Codex CLI rollouts appear under harness `chatgpt`; use `session_id` for reads and `conversation_id` for branch tools.
 
 ---
 

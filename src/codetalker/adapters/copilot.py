@@ -25,6 +25,7 @@ from codetalker.schema import (
     ToolResultBlock,
 )
 from codetalker.utils.timestamps import normalize_timestamp
+from codetalker.utils.paths import normalize_working_directory
 
 
 class GitHubCopilotAdapter(BaseAdapter):
@@ -162,6 +163,8 @@ class GitHubCopilotAdapter(BaseAdapter):
             if not display_name:
                 display_name = f"Copilot Chat {session_id[:8]}"
 
+            is_empty = user_turns == 0 and total_steps <= 1
+
             return NormalizedSession(
                 session_id=session_id,
                 harness="copilot",
@@ -171,7 +174,7 @@ class GitHubCopilotAdapter(BaseAdapter):
                 branch_label="Main Thread",
                 started_at=started_at,
                 last_activity=last_activity,
-                working_directory=working_dir,
+                working_directory=normalize_working_directory(working_dir),
                 model=model or "GitHub Copilot Chat",
                 step_count=total_steps,
                 user_turn_count=user_turns,
@@ -179,6 +182,7 @@ class GitHubCopilotAdapter(BaseAdapter):
                 source_path=file_path,
                 source_format="jsonl",
                 has_dag=False,
+                is_empty=is_empty,
             )
         except Exception:
             return None
@@ -191,8 +195,12 @@ class GitHubCopilotAdapter(BaseAdapter):
         since_last_user_input: bool = False,
         include_step_types: list[BlockType] | None = None,
         include_actor_roles: list[ActorRole] | None = None,
+        exclude_actor_roles: list[ActorRole] | None = None,
         include_thinking: bool = True,
-        include_raw_data: bool = True,
+        include_raw_data: bool = False,
+        max_step_chars: int | None = None,
+        offset: int = 0,
+        from_end: bool = False,
         limit: int | None = None,
     ) -> list[NormalizedStep]:
         raw_steps = self._load_copilot_steps(session)
@@ -204,8 +212,12 @@ class GitHubCopilotAdapter(BaseAdapter):
             since_last_user_input=since_last_user_input,
             include_step_types=include_step_types,
             include_actor_roles=include_actor_roles,
+            exclude_actor_roles=exclude_actor_roles,
             include_thinking=include_thinking,
             include_raw_data=include_raw_data,
+            max_step_chars=max_step_chars,
+            offset=offset,
+            from_end=from_end,
             limit=limit,
         )
 

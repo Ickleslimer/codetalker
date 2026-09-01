@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -95,3 +96,40 @@ def test_discover_and_load_codex_rollout():
     assert last_turn_steps[0].actor.role == ActorRole.USER
     assert "restart the auth service" in last_turn_steps[0].blocks[0].text
     assert last_turn_steps[1].actor.role == ActorRole.ASSISTANT
+
+
+def test_developer_role_mapped_to_system(tmp_path):
+    rollout = tmp_path / "developer_rollout.jsonl"
+    rollout.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "payload": {
+                            "type": "message",
+                            "role": "developer",
+                            "content": [{"type": "input_text", "text": "injected context"}],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "timestamp": "2026-01-01T00:00:01Z",
+                        "payload": {"type": "user_message", "message": "real user ask"},
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    adapter = ChatGPTAdapter()
+    session = adapter._inspect_rollout_file(str(rollout), {})
+    assert session is not None
+    steps = adapter.load_steps(session, include_raw_data=False)
+    developer_steps = [s for s in steps if s.harness_step_type == "developer_message"]
+    assert len(developer_steps) == 1
+    assert developer_steps[0].actor.role == ActorRole.SYSTEM

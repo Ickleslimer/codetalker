@@ -12,7 +12,10 @@ from codetalker.schema import (
     ForkPoint,
     NormalizedSession,
     NormalizedStep,
+    StepPagination,
+    TextBlock,
     ThinkingBlock,
+    ToolResultBlock,
 )
 
 
@@ -38,12 +41,121 @@ class BaseAdapter(ABC):
         since_last_user_input: bool = False,
         include_step_types: list[BlockType] | None = None,
         include_actor_roles: list[ActorRole] | None = None,
+        exclude_actor_roles: list[ActorRole] | None = None,
         include_thinking: bool = True,
-        include_raw_data: bool = True,
+        include_raw_data: bool = False,
+        max_step_chars: int | None = None,
+        offset: int = 0,
+        from_end: bool = False,
         limit: int | None = None,
     ) -> list[NormalizedStep]:
         """Load and normalize steps for a given session with filtering applied."""
         pass
+
+    def count_steps(self, session: NormalizedSession) -> int:
+        """Return total step count for a session (may use a cheap peek when available)."""
+        return len(
+            self.load_steps(
+                session=session,
+                include_raw_data=False,
+                include_thinking=True,
+            )
+        )
+
+    def load_steps_paginated(
+        self,
+        session: NormalizedSession,
+        since: str | None = None,
+        until: str | None = None,
+        since_last_user_input: bool = False,
+        include_step_types: list[BlockType] | None = None,
+        include_actor_roles: list[ActorRole] | None = None,
+        exclude_actor_roles: list[ActorRole] | None = None,
+        include_thinking: bool = True,
+        include_raw_data: bool = False,
+        max_step_chars: int | None = None,
+        offset: int = 0,
+        from_end: bool = False,
+        limit: int | None = None,
+    ) -> tuple[list[NormalizedStep], StepPagination]:
+        """Load steps and return pagination metadata for the applied slice."""
+        all_steps = self.load_steps(
+            session=session,
+            since=since,
+            until=until,
+            since_last_user_input=since_last_user_input,
+            include_step_types=include_step_types,
+            include_actor_roles=include_actor_roles,
+            exclude_actor_roles=exclude_actor_roles,
+            include_thinking=include_thinking,
+            include_raw_data=include_raw_data,
+            max_step_chars=max_step_chars,
+            offset=0,
+            from_end=False,
+            limit=None,
+        )
+        return self.paginate_steps(
+            all_steps, offset=offset, from_end=from_end, limit=limit
+        )
+
+    @staticmethod
+    def paginate_steps(
+        steps: Sequence[NormalizedStep],
+        offset: int = 0,
+        from_end: bool = False,
+        limit: int | None = None,
+    ) -> tuple[list[NormalizedStep], StepPagination]:
+        total = len(steps)
+        offset = max(0, offset)
+        if total == 0:
+            return [], StepPagination(
+                offset=offset,
+                limit=limit,
+                from_end=from_end,
+                returned_step_count=0,
+                total_steps_available=0,
+                has_more_before=False,
+                has_more_after=False,
+                next_offset=None,
+            )
+
+        if from_end:
+            end_exclusive = max(0, total - offset)
+            if limit is not None and limit > 0:
+                start = max(0, end_exclusive - limit)
+            else:
+                start = 0
+            sliced = list(steps[start:end_exclusive])
+            has_more_before = start > 0
+            has_more_after = offset > 0
+            next_offset = offset + len(sliced) if has_more_before and sliced else None
+            start_idx = sliced[0].step_index if sliced else None
+            end_idx = sliced[-1].step_index if sliced else None
+        else:
+            start = min(offset, total)
+            if limit is not None and limit > 0:
+                sliced = list(steps[start : start + limit])
+            else:
+                sliced = list(steps[start:])
+            end_exclusive = start + len(sliced)
+            has_more_before = start > 0
+            has_more_after = end_exclusive < total
+            next_offset = end_exclusive if has_more_after else None
+            start_idx = sliced[0].step_index if sliced else None
+            end_idx = sliced[-1].step_index if sliced else None
+
+        return sliced, StepPagination(
+            offset=offset,
+            limit=limit,
+            from_end=from_end,
+            returned_step_count=len(sliced),
+            total_steps_available=total,
+            has_more_before=has_more_before,
+            has_more_after=has_more_after,
+            next_offset=next_offset,
+            start_step_index=start_idx,
+            end_step_index=end_idx,
+        )
 
     def get_branch_tree(
         self,
@@ -60,7 +172,6 @@ class BaseAdapter(ABC):
         if not matching_branches:
             return None
 
-        # Determine primary / active branch
         active_branch = next(
             (s for s in matching_branches if s.branch_root_step_id is None),
             matching_branches[0],
@@ -72,7 +183,7 @@ class BaseAdapter(ABC):
         child_subagents: list[str] = []
 
         for s in matching_branches:
-            is_active = (s.session_id == active_branch.session_id)
+            is_active = s.session_id == active_branch.session_id
             branches_summary.append(
                 BranchSummary(
                     branch_id=s.session_id,
@@ -121,8 +232,12 @@ class BaseAdapter(ABC):
         branch_a: str,
         branch_b: str,
         root_path: str | None = None,
+        summary_only: bool = True,
+        include_raw_data: bool = False,
+        limit_per_branch: int = 20,
+        from_end: bool = True,
     ) -> BranchDiff | None:
-        """Compute the step divergence and distinct turns between two branches of a conversation."""
+        """Compute step divergence between two branches of a conversation."""
         sessions = self.discover_sessions(root_path=root_path)
         matching_map = {
             s.session_id: s
@@ -133,7 +248,6 @@ class BaseAdapter(ABC):
         sess_a = matching_map.get(branch_a)
         sess_b = matching_map.get(branch_b)
 
-        # Fallback search across all discovered sessions
         if not sess_a:
             sess_a = next((s for s in sessions if s.session_id == branch_a), None)
         if not sess_b:
@@ -142,17 +256,15 @@ class BaseAdapter(ABC):
         if not sess_a or not sess_b:
             return None
 
-        steps_a = self.load_steps(sess_a)
-        steps_b = self.load_steps(sess_b)
+        steps_a = self.load_steps(sess_a, include_raw_data=include_raw_data)
+        steps_b = self.load_steps(sess_b, include_raw_data=include_raw_data)
 
-        # Find common prefix length
         common_len = 0
         min_len = min(len(steps_a), len(steps_b))
 
         for i in range(min_len):
             sa = steps_a[i]
             sb = steps_b[i]
-            # Match by step_id in branch or by content equivalence
             if sa.branch and sb.branch and sa.branch.step_id == sb.branch.step_id:
                 common_len += 1
             elif (
@@ -169,8 +281,25 @@ class BaseAdapter(ABC):
         distinct_a = steps_a[common_len:]
         distinct_b = steps_b[common_len:]
 
-        divergence_step_id = common_steps[-1].branch.step_id if common_steps and common_steps[-1].branch else None
+        last_common = common_steps[-1] if common_steps else None
+        divergence_step_id = last_common.branch.step_id if last_common and last_common.branch else None
         divergence_index = common_len - 1 if common_len > 0 else None
+
+        if summary_only:
+            common_steps = []
+            if from_end and limit_per_branch > 0:
+                distinct_a = distinct_a[-limit_per_branch:]
+                distinct_b = distinct_b[-limit_per_branch:]
+            elif limit_per_branch > 0:
+                distinct_a = distinct_a[:limit_per_branch]
+                distinct_b = distinct_b[:limit_per_branch]
+        else:
+            if from_end and limit_per_branch > 0:
+                distinct_a = distinct_a[-limit_per_branch:]
+                distinct_b = distinct_b[-limit_per_branch:]
+            elif limit_per_branch > 0:
+                distinct_a = distinct_a[:limit_per_branch]
+                distinct_b = distinct_b[:limit_per_branch]
 
         return BranchDiff(
             conversation_id=conversation_id,
@@ -179,13 +308,22 @@ class BaseAdapter(ABC):
             branch_b_id=branch_b,
             divergence_step_id=divergence_step_id,
             divergence_step_index=divergence_index,
-            common_step_count=len(common_steps),
-            branch_a_distinct_step_count=len(distinct_a),
-            branch_b_distinct_step_count=len(distinct_b),
+            common_step_count=common_len,
+            branch_a_distinct_step_count=len(steps_a) - common_len,
+            branch_b_distinct_step_count=len(steps_b) - common_len,
             common_steps=common_steps,
             branch_a_distinct_steps=distinct_a,
             branch_b_distinct_steps=distinct_b,
+            summary_only=summary_only,
         )
+
+    @staticmethod
+    def _truncate_block_text(text: str, max_chars: int) -> tuple[str, bool]:
+        if len(text) <= max_chars:
+            return text, False
+        if max_chars <= 1:
+            return "…", True
+        return text[: max_chars - 1] + "…", True
 
     @staticmethod
     def filter_normalized_steps(
@@ -195,14 +333,17 @@ class BaseAdapter(ABC):
         since_last_user_input: bool = False,
         include_step_types: list[BlockType] | None = None,
         include_actor_roles: list[ActorRole] | None = None,
+        exclude_actor_roles: list[ActorRole] | None = None,
         include_thinking: bool = True,
-        include_raw_data: bool = True,
+        include_raw_data: bool = False,
+        max_step_chars: int | None = None,
+        offset: int = 0,
+        from_end: bool = False,
         limit: int | None = None,
     ) -> list[NormalizedStep]:
         """Standard filter implementation for a list of normalized steps."""
         filtered: list[NormalizedStep] = list(steps)
 
-        # 1. Filter by since_last_user_input: slice from the last USER turn onward
         if since_last_user_input:
             last_user_idx = -1
             for idx, step in enumerate(filtered):
@@ -211,21 +352,21 @@ class BaseAdapter(ABC):
             if last_user_idx != -1:
                 filtered = filtered[last_user_idx:]
 
-        # 2. Filter by ISO timestamp boundaries
         if since is not None:
             filtered = [s for s in filtered if s.timestamp is None or s.timestamp >= since]
         if until is not None:
             filtered = [s for s in filtered if s.timestamp is None or s.timestamp <= until]
 
-        # 3. Filter by actor roles
         if include_actor_roles is not None:
             role_set = set(include_actor_roles)
             filtered = [s for s in filtered if s.actor.role in role_set]
 
-        # 4. Filter blocks inside each step (thinking, step_types)
+        if exclude_actor_roles is not None:
+            excluded = set(exclude_actor_roles)
+            filtered = [s for s in filtered if s.actor.role not in excluded]
+
         result: list[NormalizedStep] = []
         for step in filtered:
-            # Clone step blocks
             step_blocks = list(step.blocks)
 
             if not include_thinking:
@@ -235,7 +376,34 @@ class BaseAdapter(ABC):
                 type_set = set(include_step_types)
                 step_blocks = [b for b in step_blocks if b.type in type_set]
 
-            # If block filtering removed all blocks, only keep step if original had no blocks
+            if max_step_chars is not None and max_step_chars > 0:
+                clipped_blocks = []
+                for block in step_blocks:
+                    if isinstance(block, (TextBlock, ThinkingBlock)):
+                        new_text, truncated = BaseAdapter._truncate_block_text(
+                            block.text, max_step_chars
+                        )
+                        clipped_blocks.append(
+                            block.model_copy(
+                                update={"text": new_text, "is_truncated": truncated or block.is_truncated}
+                            )
+                        )
+                    elif isinstance(block, ToolResultBlock):
+                        new_content, truncated = BaseAdapter._truncate_block_text(
+                            block.content, max_step_chars
+                        )
+                        clipped_blocks.append(
+                            block.model_copy(
+                                update={
+                                    "content": new_content,
+                                    "is_truncated": truncated or block.is_truncated,
+                                }
+                            )
+                        )
+                    else:
+                        clipped_blocks.append(block)
+                step_blocks = clipped_blocks
+
             if step.blocks and not step_blocks:
                 continue
 
@@ -244,16 +412,16 @@ class BaseAdapter(ABC):
             )
             raw = step.raw_data if (include_raw_data or has_sig) else {}
 
-            new_step = step.model_copy(
-                update={
-                    "blocks": step_blocks,
-                    "raw_data": raw,
-                }
+            result.append(
+                step.model_copy(
+                    update={
+                        "blocks": step_blocks,
+                        "raw_data": raw,
+                    }
+                )
             )
-            result.append(new_step)
 
-        # 5. Apply limit
-        if limit is not None and limit > 0:
-            result = result[:limit]
-
-        return result
+        sliced, _ = BaseAdapter.paginate_steps(
+            result, offset=offset, from_end=from_end, limit=limit
+        )
+        return sliced
