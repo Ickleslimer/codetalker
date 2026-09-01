@@ -47,6 +47,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# CodeGraph local index (regenerable)
+.codegraph/
+
 # Agent local instructions
 agents.md
 AGENTS.md
