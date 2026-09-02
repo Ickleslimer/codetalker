@@ -119,7 +119,36 @@ uv run pytest -v
 uv run codetalker --log-level INFO
 ```
 
-### Adding to MCP Configuration
+### Propagating MCP config after a move or clone
+
+When the repo moves (e.g. to `D:/codetalker`), every harness MCP entry must point at the new path. Run the installer from the repo root:
+
+```powershell
+.\scripts\install-harnesses.ps1 -ProjectRoot D:\codetalker
+```
+
+What it updates (when those config files exist on your machine):
+
+| Harness | Config file |
+|---|---|
+| **Cursor** | `%USERPROFILE%\.cursor\mcp.json` |
+| **Codex** | `%USERPROFILE%\.codex\config.toml` (`[mcp_servers.codetalker]`) |
+| **Antigravity** | `%USERPROFILE%\.gemini\antigravity\mcp_config.json` |
+| **Claude Desktop** | `%APPDATA%\Claude\claude_desktop_config.json` |
+
+Each file is backed up to `*.bak` before overwrite. **Freebuff** is not patched automatically — remove and re-add codetalker in the Freebuff client UI so a fresh MCP approval is minted (see script output for suggested command/args).
+
+Optional path-independent mode (installs a global `codetalker` shim via uv):
+
+```powershell
+.\scripts\install-harnesses.ps1 -UseUvTool
+```
+
+Limit to specific harnesses: `-Harness Cursor,Codex`. Preview changes: `-WhatIf`.
+
+After running, restart each harness and call `codetalk_capabilities` — confirm `server.project_root` matches your install.
+
+### Adding to MCP Configuration (manual)
 
 In your agent harness MCP config (e.g., Antigravity, Claude Desktop, Cursor):
 
