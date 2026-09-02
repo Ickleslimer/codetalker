@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import glob
-import hashlib
 import json
 import logging
 import os
@@ -11,6 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from codetalker.adapter_base import BaseAdapter
+from codetalker.adapters.opencode_sidecar import (
+    default_opencode_db_path,
+    discover_sessions_from_db,
+    load_steps_from_sidecar,
+)
 from codetalker.schema import (
     Actor,
     ActorRole,
@@ -31,7 +35,10 @@ logger = logging.getLogger("codetalker.adapters.opencode")
 
 DESKTOP_COVERAGE_WARNING = (
     "OpenCode Desktop stores client-side prompt drafts only; "
-    "assistant replies and tool executions are not persisted locally."
+    "assistant replies and tool executions are not persisted in drafts.sqlite. "
+    "Session titles come from opencode.window.*.dat when drafts are empty. "
+    "Full transcripts are available from ~/.local/share/opencode/opencode.db "
+    "or the live sidecar API when OpenCode Desktop is running."
 )
 
 
@@ -57,13 +64,19 @@ class OpenCodeAdapter(BaseAdapter):
         if root_path:
             p = Path(root_path)
             if p.is_file():
-                if p.name.endswith(".sqlite") or p.name.endswith(".db"):
+                if p.name == "opencode.db":
+                    sessions.extend(discover_sessions_from_db(str(p)))
+                elif p.name.endswith(".sqlite") or p.name.endswith(".db"):
                     sessions.extend(self._discover_from_sqlite(str(p)))
                 elif p.name.endswith(".jsonl") or p.name.endswith(".json"):
                     sess = self._inspect_jsonl_file(str(p))
                     if sess:
                         sessions.append(sess)
-                return sessions
+                if p.name == "drafts.sqlite":
+                    sidecar_db = default_opencode_db_path()
+                    if sidecar_db:
+                        sessions.extend(discover_sessions_from_db(sidecar_db))
+                return self._dedupe_sessions(sessions)
             elif p.is_dir():
                 for sf in p.glob("**/drafts.sqlite"):
                     sessions.extend(self._discover_from_sqlite(str(sf)))
@@ -76,6 +89,10 @@ class OpenCodeAdapter(BaseAdapter):
         desktop_db = os.path.expanduser("~/AppData/Roaming/ai.opencode.desktop/drafts.sqlite")
         if os.path.isfile(desktop_db):
             sessions.extend(self._discover_from_sqlite(desktop_db))
+
+        sidecar_db = default_opencode_db_path()
+        if sidecar_db:
+            sessions.extend(discover_sessions_from_db(sidecar_db))
 
         for base in (
             "~/.opencode/sessions",
@@ -90,24 +107,67 @@ class OpenCodeAdapter(BaseAdapter):
                         sessions.append(sess)
 
         sessions.sort(key=lambda s: s.last_activity or "", reverse=True)
-        return self._dedupe_desktop_drafts(sessions)
+        return self._dedupe_sessions(sessions)
 
     @staticmethod
-    def _dedupe_desktop_drafts(sessions: list[NormalizedSession]) -> list[NormalizedSession]:
-        seen: set[str] = set()
-        unique: list[NormalizedSession] = []
+    def _source_priority(source_format: str) -> int:
+        return {
+            "opencode_sidecar": 0,
+            "jsonl": 1,
+            "opencode_desktop_draft": 2,
+            "sqlite": 3,
+        }.get(source_format, 4)
+
+    def _dedupe_sessions(self, sessions: list[NormalizedSession]) -> list[NormalizedSession]:
+        """Prefer sidecar DB transcripts over desktop prompt drafts for the same session_id."""
+        best: dict[str, NormalizedSession] = {}
         for sess in sessions:
-            if sess.source_format != "opencode_desktop_draft":
-                unique.append(sess)
+            existing = best.get(sess.session_id)
+            if existing is None:
+                best[sess.session_id] = sess
                 continue
-            fingerprint = hashlib.sha1(
-                f"{sess.working_directory}|{sess.display_name}|{sess.started_at}".encode()
-            ).hexdigest()
-            if fingerprint in seen:
-                continue
-            seen.add(fingerprint)
-            unique.append(sess)
-        return unique
+            if self._source_priority(sess.source_format) < self._source_priority(
+                existing.source_format
+            ):
+                best[sess.session_id] = sess
+        deduped = list(best.values())
+        deduped.sort(key=lambda s: s.last_activity or "", reverse=True)
+        return deduped
+
+    def _discover_window_session_metadata(
+        self, desktop_dir: str
+    ) -> dict[str, dict[str, str]]:
+        """Load session title/directory from opencode.window.*.dat tabs.info."""
+        metadata: dict[str, dict[str, str]] = {}
+        if not os.path.isdir(desktop_dir):
+            return metadata
+
+        pattern = os.path.join(desktop_dir, "opencode.window.*.dat")
+        for path in glob.glob(pattern):
+            try:
+                with open(path, encoding="utf-8", errors="ignore") as f:
+                    data = json.load(f)
+                tabs_info_raw = data.get("tabs.info")
+                if not tabs_info_raw:
+                    continue
+                tabs_info = (
+                    json.loads(tabs_info_raw)
+                    if isinstance(tabs_info_raw, str)
+                    else tabs_info_raw
+                )
+                for tab_key, info in tabs_info.items():
+                    if "/session/" not in tab_key:
+                        continue
+                    sid = tab_key.rsplit("/session/", 1)[-1]
+                    if not sid:
+                        continue
+                    metadata[sid] = {
+                        "title": str(info.get("title") or "").strip(),
+                        "directory": str(info.get("directory") or "").strip(),
+                    }
+            except Exception as e:
+                logger.debug("Failed to parse OpenCode window file %s: %s", path, e)
+        return metadata
 
     def _discover_from_sqlite(self, db_path: str) -> list[NormalizedSession]:
         sessions: list[NormalizedSession] = []
@@ -117,6 +177,8 @@ class OpenCodeAdapter(BaseAdapter):
         try:
             mtime = os.path.getmtime(db_path)
             last_activity = normalize_timestamp(mtime)
+            desktop_dir = os.path.dirname(db_path)
+            window_meta = self._discover_window_session_metadata(desktop_dir)
 
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             cursor = conn.cursor()
@@ -164,16 +226,16 @@ class OpenCodeAdapter(BaseAdapter):
                 except Exception:
                     pass
 
-                if not prompt_preview and prompt_history_entries:
-                    first_entry = prompt_history_entries[0]
-                    p_items = first_entry.get("prompt", [])
-                    if p_items:
-                        prompt_preview = p_items[0].get("content", "")
+                win = window_meta.get(sid, {})
+                if win.get("directory") and not ws_path:
+                    ws_path = win["directory"]
+                if win.get("title") and not (prompt_preview and prompt_preview.strip()):
+                    prompt_preview = win["title"]
 
                 display_name, truncated = clip_display_name(
                     prompt_preview.strip() if prompt_preview else f"OpenCode Session {sid[:8]}"
                 )
-                user_turns = max(session_prompt_count, len(prompt_history_entries))
+                user_turns = max(session_prompt_count, 1 if prompt_preview else 0)
 
                 sessions.append(
                     NormalizedSession(
@@ -291,8 +353,12 @@ class OpenCodeAdapter(BaseAdapter):
         from_end: bool = False,
         limit: int | None = None,
     ) -> list[NormalizedStep]:
-        if session.source_format == "opencode_desktop_draft":
-            raw_steps = self._load_sqlite_steps(session)
+        if session.source_format == "opencode_sidecar":
+            raw_steps = load_steps_from_sidecar(session, include_raw_data=include_raw_data)
+        elif session.source_format == "opencode_desktop_draft":
+            raw_steps = load_steps_from_sidecar(session, include_raw_data=include_raw_data)
+            if not raw_steps:
+                raw_steps = self._load_sqlite_steps(session)
         elif session.source_format == "sqlite":
             raw_steps = self._load_sqlite_steps(session)
         else:

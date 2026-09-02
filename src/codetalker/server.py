@@ -42,8 +42,9 @@ HARNESS_NOTES: dict[str, str] = {
         "MCP requires Freebuff consent sidecar approval after config changes."
     ),
     "opencode": (
-        "OpenCode CLI JSONL has full transcripts; desktop drafts.sqlite is prompt-only. "
-        "Use codetalk_search(query='<thread title>') to find desktop drafts by title."
+        "OpenCode sidecar transcripts live in ~/.local/share/opencode/opencode.db; "
+        "desktop drafts.sqlite is prompt-only. Empty sidecar sessions are indexed via "
+        "opencode.window.*.dat titles. Use codetalk_search(query='<thread title>') to find sessions."
     ),
     "windsurf": "Devin/Windsurf Cascade protobuf chat state.",
     "claude": "Fixture-tested; requires ~/.claude/projects sessions locally.",
