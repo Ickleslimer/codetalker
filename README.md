@@ -59,22 +59,37 @@ CodeTalker is an agent-callable tool and MCP server that normalizes conversation
 |---|---|---|
 | `codetalk_capabilities` | _(none)_ | List harnesses, aliases, ID guidance, context-recovery playbook, and recommended read defaults. Call once per agent session. |
 | `codetalk_list` | `harness`, `conversation_id`, `working_directory`, `since`, `limit`, `root_path`, `include_capabilities`, `include_harness_status` | List sessions (slim by default). Filter by `working_directory` for project-scoped recovery. |
-| `codetalk_resolve_session` | `working_directory`, `harness`, `root_path`, `limit` | Resolve the most recent session for a project path when `session_id` is unknown (common Freebuff context-loss recovery). |
+| `codetalk_resolve_session` | `working_directory`, `harness`, `display_name`, `root_path`, `limit` | Resolve the most recent session for a project path when `session_id` is unknown (common Freebuff context-loss recovery). Optional `display_name` narrows by thread title. |
 | `codetalk_read` | `session_id`, `harness`, `working_directory`, `since`, `until`, `since_last_user_input`, `conversation_only`, `exclude_actor_roles`, `include_thinking`, `include_raw_data`, `max_step_chars`, `offset`, `from_end`, `limit`, `root_path` | Read normalized steps. Provide `session_id` **or** `working_directory`. Defaults: tail slice (`from_end=true`), conversation-only (`conversation_only=true`), no raw payloads (`include_raw_data=false`). |
 | `codetalk_branches` | `conversation_id`, `harness`, `root_path` | DAG branch tree, fork points, and subagent hierarchy (`branch_id` usually equals `session_id`). |
 | `codetalk_diff_branches` | `conversation_id`, `branch_a`, `branch_b`, `harness`, `summary_only`, `include_raw_data`, `limit_per_branch`, `from_end`, `root_path` | Compare branches. Defaults to `summary_only=true` (counts/metadata only). |
 | `codetalk_filter` | `session_id`, `harness`, `working_directory`, `keywords`, `step_types`, `actor_roles`, `conversation_only`, `exclude_actor_roles`, `since_last_user_input`, `include_thinking`, `include_raw_data`, `max_step_chars`, `offset`, `from_end`, `limit`, `root_path` | Filter steps by keywords, types, or roles. Accepts `session_id` or `working_directory`. |
-| `codetalk_search` | `query`, `harness`, `since`, `limit`, `max_sessions_to_search`, `root_path` | Search titles and recent transcript tails (includes `step_index`). |
+| `codetalk_search` | `query`, `harness`, `working_directory`, `since`, `limit`, `max_sessions_to_search`, `search_scope`, `root_path` | Search titles and transcript content. Pass `working_directory` or `harness` when scoped to one project. Title hits use `match_type=title`. |
 | `codetalk_info` | `session_id`, `harness`, `working_directory`, `root_path` | Fast metadata without step bodies (refreshes step counts when possible). Accepts `session_id` or `working_directory`. |
 
 ### Agent quickstart
 
-1. `codetalk_capabilities` — learn harness names, aliases (`codex` → `chatgpt`), and ID fields.
-2. `codetalk_list` — find recent sessions (`harness_status` explains empty harnesses).
-3. `codetalk_read` with defaults — tail of conversation without system injections or `raw_data`.
-4. `codetalk_branches` when `has_dag=true` on a listed session.
+1. `codetalk_capabilities` — learn harness names, aliases, tool catalog, and unsupported hallucinated names (`read_transcript`, etc.).
+2. **Decision tree:**
+   - Lost context + know project path → `codetalk_resolve_session` → `codetalk_read(since_last_user_input=true)`
+   - Know `session_id` → `codetalk_read`
+   - Grep / find by title → `codetalk_search(query=..., working_directory=... or harness=...)`
+   - Branch history → `codetalk_branches` / `codetalk_diff_branches`
+3. `codetalk_list` — browse metadata; filter with `working_directory` and/or `harness` on busy machines.
+4. `codetalk_read` with defaults — tail slice without system injections or `raw_data`.
 
 Note: Codex CLI rollouts appear under harness `chatgpt`; use `session_id` for reads and `conversation_id` for branch tools.
+
+### Per-harness MCP onboarding
+
+| Harness | Setup notes |
+|---|---|
+| **Cursor / Antigravity / Claude Desktop** | Add MCP block with `uv run --project /path/to/codetalker codetalker`. Restart after config changes. |
+| **Freebuff** | Config in `~/.config/freebuff-desktop`. Approve the MCP consent sidecar when prompted, then restart. Verify with `codetalk_capabilities`. |
+| **Codex desktop** | MCP config differs from CLI; mirror a working Cursor/Antigravity definition if supported. Desktop may not expose MCP. |
+| **OpenCode** | Desktop drafts are prompt-only; use CLI JSONL or `codetalk_search(query='<thread title>')` for cross-harness title lookup. |
+
+`codetalk_capabilities` and `codetalk_info` return `server.project_root` — update MCP config if it points at a stale scratch copy.
 
 ### Context recovery (Freebuff-first)
 

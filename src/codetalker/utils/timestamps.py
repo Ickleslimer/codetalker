@@ -67,3 +67,35 @@ def normalize_timestamp(value: Any) -> str | None:
                 continue
 
     return None
+
+
+def compare_timestamps(a: Any, b: Any) -> int | None:
+    """Compare two timestamp values after normalization.
+
+    Returns -1 if a < b, 0 if equal, 1 if a > b, or None if either is unparseable.
+    """
+    na = normalize_timestamp(a)
+    nb = normalize_timestamp(b)
+    if na is None or nb is None:
+        return None
+    if na < nb:
+        return -1
+    if na > nb:
+        return 1
+    return 0
+
+
+def timestamp_gte(value: Any, threshold: str) -> bool:
+    """True if value is at or after threshold, or if either side is unparseable (include step)."""
+    cmp = compare_timestamps(value, threshold)
+    if cmp is None:
+        return True
+    return cmp >= 0
+
+
+def timestamp_lte(value: Any, threshold: str) -> bool:
+    """True if value is at or before threshold, or if either side is unparseable (include step)."""
+    cmp = compare_timestamps(value, threshold)
+    if cmp is None:
+        return True
+    return cmp <= 0

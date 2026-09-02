@@ -7,6 +7,8 @@ from typing import Any
 
 from codetalker.adapter_base import BaseAdapter
 from codetalker.registry import registry
+from codetalker.utils.paths import normalize_working_directory, working_directories_match
+from codetalker.utils.timestamps import timestamp_gte
 from codetalker.schema import (
     ActorRole,
     NormalizedSession,
@@ -145,6 +147,7 @@ class SearchOptions:
     include_context_steps: int = 0
     root_path: str | None = None
     harnesses: list[str] | None = None
+    working_directory: str | None = None
 
 
 @dataclass
@@ -193,13 +196,22 @@ def search_sessions(
             key=lambda s: s.last_activity or s.started_at or "", reverse=True
         )
 
+        if options.working_directory:
+            sessions = [
+                s
+                for s in sessions
+                if working_directories_match(s.working_directory, options.working_directory)
+            ]
+
         searched_count = 0
         session_hit_counts: dict[str, int] = {}
 
         for sess in sessions:
             if options.limit > 0 and len(matches) >= options.limit:
                 break
-            if options.since and (sess.last_activity or sess.started_at or "") < options.since:
+            if options.since and not timestamp_gte(
+                sess.last_activity or sess.started_at or "", options.since
+            ):
                 if progress:
                     progress.sessions_skipped_since += 1
                 continue
@@ -365,6 +377,8 @@ def _build_hit(
         "preview": preview,
         "timestamp": timestamp,
         "step_index": step_index,
+        "working_directory": session.working_directory,
+        "normalized_working_directory": normalize_working_directory(session.working_directory),
     }
     if tool_name:
         hit["tool_name"] = tool_name

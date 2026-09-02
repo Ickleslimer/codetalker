@@ -17,6 +17,7 @@ from codetalker.schema import (
     ThinkingBlock,
     ToolResultBlock,
 )
+from codetalker.utils.timestamps import timestamp_gte, timestamp_lte
 
 
 class BaseAdapter(ABC):
@@ -353,9 +354,13 @@ class BaseAdapter(ABC):
                 filtered = filtered[last_user_idx:]
 
         if since is not None:
-            filtered = [s for s in filtered if s.timestamp is None or s.timestamp >= since]
+            filtered = [
+                s for s in filtered if s.timestamp is None or timestamp_gte(s.timestamp, since)
+            ]
         if until is not None:
-            filtered = [s for s in filtered if s.timestamp is None or s.timestamp <= until]
+            filtered = [
+                s for s in filtered if s.timestamp is None or timestamp_lte(s.timestamp, until)
+            ]
 
         if include_actor_roles is not None:
             role_set = set(include_actor_roles)

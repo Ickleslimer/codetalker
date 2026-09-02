@@ -144,15 +144,25 @@ class ChatGPTAdapter(BaseAdapter):
 
     def _find_rollout_file(self, session: NormalizedSession) -> str | None:
         """Resolve actual path on disk for a codex rollout session."""
-        if os.path.isfile(session.source_path):
+        if session.source_path and os.path.isfile(session.source_path):
             return session.source_path
 
         codex_dir = os.path.expanduser("~/.codex/sessions")
-        sid = session.conversation_id or session.session_id
-        pattern = os.path.join(codex_dir, "**", f"rollout-*{sid}*.jsonl")
-        matches = glob.glob(pattern, recursive=True)
-        if matches:
-            return matches[0]
+        candidates: list[str] = []
+        for val in (session.session_id, session.conversation_id):
+            if val and val not in candidates:
+                candidates.append(val)
+
+        for sid in candidates:
+            patterns = [
+                os.path.join(codex_dir, "**", f"rollout-{sid}.jsonl"),
+                os.path.join(codex_dir, "**", f"rollout-*{sid}*.jsonl"),
+            ]
+            for pattern in patterns:
+                matches = glob.glob(pattern, recursive=True)
+                if matches:
+                    matches.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+                    return matches[0]
         return None
 
     def _discover_single_rollout(self, rollout_path: str) -> list[NormalizedSession]:

@@ -10,10 +10,17 @@ import click
 from mcp.server.mcpserver import MCPServer
 
 import codetalker.adapters  # noqa: F401
+from codetalker.agent_guidance import (
+    DECISION_TREE,
+    TOOL_CATALOG,
+    UNSUPPORTED_TOOLS,
+    build_server_metadata,
+)
 from codetalker.registry import registry
 from codetalker.schema import ActorRole, BlockType, NormalizedSession, NormalizedStep
 from codetalker.search import SearchOptions, normalize_queries, search_sessions
 from codetalker.utils.paths import normalize_working_directory, working_directories_match
+from codetalker.utils.timestamps import timestamp_gte
 
 logger = logging.getLogger("codetalker.server")
 
@@ -23,13 +30,21 @@ PAYLOAD_WARNING_BYTES = 500_000
 
 HARNESS_NOTES: dict[str, str] = {
     "chatgpt": "Includes OpenAI Codex CLI rollouts and ChatGPT exports; alias: codex.",
-    "cursor": "Reads Cursor Composer sessions from state.vscdb.",
+    "cursor": (
+        "Reads Cursor Composer sessions from state.vscdb. SQLite index is thin — "
+        "prefer Codex CLI rollouts for deep cross-session history. Pass working_directory "
+        "when list/search returns empty."
+    ),
     "antigravity": "Supports subagent branches and DAG fork points.",
     "freebuff": (
         "Full multi-turn logs from Freebuff desktop SQLite. "
-        "Use codetalk_resolve_session when the in-thread agent lost context."
+        "Use codetalk_resolve_session when the in-thread agent lost context. "
+        "MCP requires Freebuff consent sidecar approval after config changes."
     ),
-    "opencode": "OpenCode CLI JSONL has full transcripts; desktop drafts are prompt-only.",
+    "opencode": (
+        "OpenCode CLI JSONL has full transcripts; desktop drafts.sqlite is prompt-only. "
+        "Use codetalk_search(query='<thread title>') to find desktop drafts by title."
+    ),
     "windsurf": "Devin/Windsurf Cascade protobuf chat state.",
     "claude": "Fixture-tested; requires ~/.claude/projects sessions locally.",
     "aider": "Fixture-tested; reads markdown chat history files.",
@@ -55,9 +70,49 @@ CONTEXT_RECOVERY_PLAYBOOK: dict[str, Any] = {
         "codetalk_read accepts working_directory instead of session_id for one-shot recovery.",
         "Prefer since_last_user_input=true when the user just said 'continue'.",
     ],
+    "decision_tree": DECISION_TREE,
 }
 
 FIXTURE_TESTED_HARNESSES = frozenset({"claude", "aider", "copilot"})
+
+
+class SessionLookupError(ValueError):
+    """Raised when session resolution fails; hints guide agents to the right tool."""
+
+    def __init__(self, message: str, hints: list[str] | None = None):
+        hint_text = ""
+        if hints:
+            hint_text = "\nHints: " + " | ".join(hints)
+        super().__init__(message + hint_text)
+        self.hints = hints or []
+
+
+def _session_lookup_hints(
+    *,
+    session_id: str | None = None,
+    working_directory: str | None = None,
+    harness: str | None = None,
+) -> list[str]:
+    hints = [
+        "Call codetalk_capabilities first — do not guess tool names like read_transcript.",
+    ]
+    if session_id and session_id.strip().startswith("conversation://"):
+        hints.append("Strip conversation:// prefix or pass the bare UUID as session_id.")
+    if working_directory:
+        hints.append(
+            "Try codetalk_resolve_session(working_directory=..., harness=...) for the latest thread."
+        )
+    elif session_id:
+        hints.append(
+            "If session_id came from another harness, pass harness='antigravity'|'chatgpt'|etc."
+        )
+        hints.append(
+            "Or use codetalk_search(query='<title or keyword>', search_scope='full') to re-find the session."
+        )
+    if not harness:
+        hints.append("Pass harness when known to avoid searching the wrong adapter.")
+    hints.append("codetalk_read and codetalk_info accept working_directory instead of session_id.")
+    return hints
 
 
 def _get_adapter(harness: str | None = None) -> Any:
@@ -282,7 +337,10 @@ def _find_session(
             return res
 
     h_msg = f" for harness '{harness}'" if harness else " across all harnesses"
-    raise ValueError(f"Session '{session_id}' not found{h_msg}.")
+    raise SessionLookupError(
+        f"Session '{session_id}' not found{h_msg}.",
+        hints=_session_lookup_hints(session_id=session_id, harness=harness),
+    )
 
 
 def _sessions_for_working_directory(
@@ -317,14 +375,28 @@ def _resolve_session_by_working_directory(
     working_directory: str,
     harness: str | None = None,
     root_path: str | None = None,
+    display_name: str | None = None,
 ) -> tuple[Any, NormalizedSession]:
     matches = _sessions_for_working_directory(working_directory, harness, root_path)
+    if display_name and display_name.strip():
+        name_lower = display_name.strip().lower()
+        titled = [s for s in matches if s.display_name and name_lower in s.display_name.lower()]
+        if titled:
+            matches = titled
     if not matches:
         h_msg = f" for harness '{harness}'" if harness else ""
         normalized = normalize_working_directory(working_directory)
-        raise ValueError(
+        extra_hints: list[str] = []
+        if display_name:
+            extra_hints.append(f"No session title matched display_name='{display_name}'.")
+        raise SessionLookupError(
             f"No session found for working_directory='{working_directory}'"
-            f"{h_msg}. Normalized query: '{normalized}'."
+            f"{h_msg}. Normalized query: '{normalized}'.",
+            hints=_session_lookup_hints(
+                working_directory=working_directory,
+                harness=harness,
+            )
+            + extra_hints,
         )
     session = matches[0]
     return _adapter_for_session(session), session
@@ -335,14 +407,21 @@ def _resolve_session_ref(
     harness: str | None = None,
     root_path: str | None = None,
     working_directory: str | None = None,
+    display_name: str | None = None,
 ) -> tuple[Any, NormalizedSession]:
     if session_id and session_id.strip():
         return _find_session(session_id, harness, root_path=root_path)
     if working_directory and working_directory.strip():
         return _resolve_session_by_working_directory(
-            working_directory, harness, root_path=root_path
+            working_directory,
+            harness,
+            root_path=root_path,
+            display_name=display_name,
         )
-    raise ValueError("Provide session_id or working_directory.")
+    raise SessionLookupError(
+        "Provide session_id or working_directory.",
+        hints=_session_lookup_hints(harness=harness),
+    )
 
 
 def _discover_all_sessions(
@@ -414,9 +493,12 @@ def _build_harness_status(per_harness_counts: dict[str, int]) -> dict[str, dict[
 def codetalk_capabilities() -> str:
     """Return harness capabilities and ID usage guidance."""
     payload = {
+        "server": build_server_metadata(),
         "harnesses": registry.list_canonical_harnesses(),
         "aliases": registry.list_aliases(),
         "harness_notes": HARNESS_NOTES,
+        "tool_catalog": TOOL_CATALOG,
+        "unsupported_tools": UNSUPPORTED_TOOLS,
         "id_guidance": {
             "session_id": "Use for codetalk_read, codetalk_filter, codetalk_info.",
             "working_directory": (
@@ -436,6 +518,10 @@ def codetalk_capabilities() -> str:
             "include_raw_data": False,
             "limit": 30,
         },
+        "search_guidance": (
+            "Always pass working_directory or harness when searching a known project. "
+            "Use search_scope='full' for deep history. Title matches return match_type='title'."
+        ),
     }
     return json.dumps(payload, indent=2)
 
@@ -473,7 +559,9 @@ def codetalk_list(
 
     if since:
         all_sessions = [
-            s for s in all_sessions if (s.last_activity or s.started_at or "") >= since
+            s
+            for s in all_sessions
+            if timestamp_gte(s.last_activity or s.started_at or "", since)
         ]
 
     all_sessions.sort(key=lambda s: s.last_activity or s.started_at or "", reverse=True)
@@ -507,17 +595,33 @@ def codetalk_list(
 def codetalk_resolve_session(
     working_directory: str,
     harness: str | None = None,
+    display_name: str | None = None,
     root_path: str | None = None,
     limit: int = 5,
 ) -> str:
     """Resolve the latest session for a workspace path."""
     matches = _sessions_for_working_directory(working_directory, harness, root_path)
+    if display_name and display_name.strip():
+        name_lower = display_name.strip().lower()
+        titled = [s for s in matches if s.display_name and name_lower in s.display_name.lower()]
+        if titled:
+            matches = titled
     if not matches:
         h_msg = f" for harness '{harness}'" if harness else ""
         normalized = normalize_working_directory(working_directory)
-        raise ValueError(
+        extra_hints: list[str] = []
+        if display_name:
+            extra_hints.append(
+                f"Try codetalk_search(query='{display_name}', search_scope='full') across harnesses."
+            )
+        raise SessionLookupError(
             f"No session found for working_directory='{working_directory}'"
-            f"{h_msg}. Normalized query: '{normalized}'."
+            f"{h_msg}. Normalized query: '{normalized}'.",
+            hints=_session_lookup_hints(
+                working_directory=working_directory,
+                harness=harness,
+            )
+            + extra_hints,
         )
 
     primary = matches[0]
@@ -617,6 +721,16 @@ def codetalk_read(
         "pagination": pagination.model_dump(mode="json"),
         "steps": [s.model_dump(mode="json", exclude_none=True) for s in steps],
     }
+    if not steps and (total_steps or 0) > 0:
+        payload["read_warning"] = (
+            f"Session has {total_steps} steps but none matched filters. "
+            "Try widening limit, setting conversation_only=false, or check source_path."
+        )
+    elif not steps and not (total_steps or session.step_count):
+        payload["read_warning"] = (
+            "No steps loaded — transcript file may be missing or unreadable. "
+            "Call codetalk_info and verify harness/source_path; try codetalk_search to re-find."
+        )
     payload.update(_payload_meta(payload))
     return json.dumps(payload, indent=2)
 
@@ -720,6 +834,7 @@ def codetalk_filter(
 def codetalk_search(
     query: str,
     harness: str | None = None,
+    working_directory: str | None = None,
     since: str | None = None,
     limit: int = 20,
     max_sessions_to_search: int = 30,
@@ -735,6 +850,7 @@ def codetalk_search(
         query=query,
         queries=queries,
         harness=harness,
+        working_directory=working_directory,
         since=since,
         limit=limit,
         max_sessions_to_search=max_sessions_to_search,
@@ -745,16 +861,24 @@ def codetalk_search(
         root_path=root_path,
     )
     matches = search_sessions(options)
-    return json.dumps(
-        {
-            "query": query,
-            "queries": normalize_queries(query, queries),
-            "search_scope": search_scope,
-            "match_count": len(matches),
-            "results": matches,
-        },
-        indent=2,
-    )
+    payload: dict[str, Any] = {
+        "query": query,
+        "queries": normalize_queries(query, queries),
+        "search_scope": search_scope,
+        "match_count": len(matches),
+        "results": matches,
+    }
+    if (
+        not working_directory
+        and not harness
+        and limit > 0
+        and len(matches) >= limit
+    ):
+        payload["warning"] = (
+            "Result cap reached without working_directory or harness filter. "
+            "Re-run with working_directory='<project path>' for project-scoped search."
+        )
+    return json.dumps(payload, indent=2)
 
 
 @server.tool(
@@ -778,7 +902,9 @@ def codetalk_info(
         session.step_count = adapter.count_steps(session)
     except Exception:
         pass
-    return json.dumps(session.model_dump(mode="json", exclude={"steps"}), indent=2)
+    payload = session.model_dump(mode="json", exclude={"steps"})
+    payload["server"] = build_server_metadata()
+    return json.dumps(payload, indent=2)
 
 
 @server.tool(

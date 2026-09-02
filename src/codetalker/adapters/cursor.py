@@ -27,6 +27,7 @@ from codetalker.schema import (
     ToolResultBlock,
 )
 from codetalker.utils.timestamps import normalize_timestamp
+from codetalker.utils.tool_errors import content_indicates_tool_error
 from codetalker.utils.paths import normalize_working_directory
 from codetalker.utils.display import clip_display_name
 
@@ -398,13 +399,39 @@ class CursorAdapter(BaseAdapter):
                     # 3. Check for tool calls or diffs
                     tool_case = grouping.get("toolCallCase") or (bubble_data.get("toolFormerTool") if bubble_data else None)
                     tool_id = grouping.get("toolCallId") or (bubble_data.get("toolCallId") if bubble_data else None)
+                    tool_status = grouping.get("toolFormerStatus") or (
+                        bubble_data.get("toolFormerStatus") if bubble_data else None
+                    )
                     if tool_case or tool_id:
                         blocks.append(
                             ToolCallBlock(
                                 tool_name=str(tool_case or "cursor_tool"),
-                                tool_args={"toolCallId": tool_id, "status": grouping.get("toolFormerStatus")},
+                                tool_args={
+                                    "toolCallId": tool_id,
+                                    "status": tool_status,
+                                },
                             )
                         )
+                        result_text = ""
+                        if bubble_data:
+                            result_text = str(
+                                bubble_data.get("result")
+                                or bubble_data.get("toolResult")
+                                or bubble_data.get("text")
+                                or ""
+                            )
+                        if result_text and (
+                            (tool_status and str(tool_status).lower() in ("error", "failed", "failure"))
+                            or content_indicates_tool_error(result_text)
+                        ):
+                            blocks.append(
+                                ToolResultBlock(
+                                    tool_name=str(tool_case or "cursor_tool"),
+                                    tool_call_id=str(tool_id) if tool_id else None,
+                                    content=result_text[:8000],
+                                    is_error=True,
+                                )
+                            )
 
                     # Assistant suggested diffs
                     if bubble_data and bubble_data.get("assistantSuggestedDiffs"):

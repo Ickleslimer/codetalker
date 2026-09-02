@@ -42,3 +42,11 @@ def test_normalize_invalid_and_none():
     assert normalize_timestamp(None) is None
     assert normalize_timestamp("") is None
     assert normalize_timestamp("not-a-timestamp") is None
+
+
+def test_compare_timestamps_and_gte():
+    from codetalker.utils.timestamps import compare_timestamps, timestamp_gte
+
+    assert compare_timestamps("2026-08-22T13:51:21+01:00", "2026-08-22T12:51:21Z") == 0
+    assert timestamp_gte("2026-09-02T03:38:16+01:00", "2026-09-01") is True
+    assert timestamp_gte("2026-08-01T00:00:00Z", "2026-09-01") is False

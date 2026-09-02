@@ -28,6 +28,7 @@ from codetalker.schema import (
     ToolResultBlock,
 )
 from codetalker.utils.timestamps import normalize_timestamp
+from codetalker.utils.tool_errors import content_indicates_tool_error
 
 logger = logging.getLogger("codetalker.adapters.antigravity")
 
@@ -310,15 +311,36 @@ class AntigravityAdapter(BaseAdapter):
             limit=limit,
         )
 
+    def _find_transcript_path(self, session: NormalizedSession) -> str | None:
+        if session.source_path and os.path.isfile(session.source_path):
+            return session.source_path
+        brain_dir = os.path.expanduser("~/.gemini/antigravity/brain")
+        candidate = os.path.join(
+            brain_dir,
+            session.session_id,
+            ".system_generated",
+            "logs",
+            "transcript.jsonl",
+        )
+        if os.path.isfile(candidate):
+            return candidate
+        return None
+
     def _load_transcript_steps(
         self, session: NormalizedSession
     ) -> list[NormalizedStep]:
         steps: list[NormalizedStep] = []
-        if not os.path.isfile(session.source_path):
+        transcript_path = self._find_transcript_path(session)
+        if not transcript_path:
+            logger.warning(
+                "Antigravity transcript not found for session_id=%s (source_path=%s)",
+                session.session_id,
+                session.source_path,
+            )
             return steps
 
         step_idx = 0
-        with open(session.source_path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(transcript_path, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -426,7 +448,10 @@ class AntigravityAdapter(BaseAdapter):
                         ToolResultBlock(
                             content=content_str,
                             is_truncated="content" in truncated_fields,
-                            is_error=(data.get("status") == "ERROR"),
+                            is_error=(
+                                data.get("status") == "ERROR"
+                                or content_indicates_tool_error(content_str)
+                            ),
                         )
                     )
                     step = NormalizedStep(

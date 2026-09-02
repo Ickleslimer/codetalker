@@ -60,3 +60,5 @@ def test_codetalk_capabilities_includes_context_recovery():
     assert "context_recovery" in payload
     assert "freebuff" in payload["context_recovery"]["recommended_flow"][0]
     assert "working_directory" in payload["id_guidance"]
+    assert "tool_catalog" in payload
+    assert "server" in payload
