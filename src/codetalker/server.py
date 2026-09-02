@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import click
@@ -11,6 +12,7 @@ from mcp.server.mcpserver import MCPServer
 import codetalker.adapters  # noqa: F401
 from codetalker.registry import registry
 from codetalker.schema import ActorRole, BlockType, NormalizedSession, NormalizedStep
+from codetalker.search import SearchOptions, normalize_queries, search_sessions
 from codetalker.utils.paths import normalize_working_directory, working_directories_match
 
 logger = logging.getLogger("codetalker.server")
@@ -710,7 +712,10 @@ def codetalk_filter(
 
 @server.tool(
     name="codetalk_search",
-    description="Search across all sessions and transcripts for a query string.",
+    description=(
+        "Search across all sessions and transcripts for a query string. "
+        "Use search_scope='full' for entire threads; defaults scan recent tail only."
+    ),
 )
 def codetalk_search(
     query: str,
@@ -718,108 +723,33 @@ def codetalk_search(
     since: str | None = None,
     limit: int = 20,
     max_sessions_to_search: int = 30,
+    max_hits_per_session: int = 1,
+    search_scope: str = "tail",
+    queries: list[str] | None = None,
+    match_tool_names: bool = True,
+    include_context_steps: int = 0,
     root_path: str | None = None,
 ) -> str:
     """Search for query in session transcripts efficiently."""
-    if harness:
-        harnesses = [harness]
-    else:
-        harnesses = registry.list_canonical_harnesses()
-
-    query_lower = query.lower()
-    matches: list[dict[str, Any]] = []
-    seen_session_hits: set[tuple[str, str]] = set()
-
-    for h in harnesses:
-        if len(matches) >= limit:
-            break
-        adapter = registry.get(h)
-        if not adapter:
-            continue
-        try:
-            sessions = adapter.discover_sessions(root_path=root_path)
-        except Exception as e:
-            logger.warning(f"Error during search discovery for harness '{h}': {e}")
-            continue
-
-        sessions.sort(
-            key=lambda s: s.last_activity or s.started_at or "", reverse=True
-        )
-
-        searched_count = 0
-        for sess in sessions:
-            if len(matches) >= limit:
-                break
-            if since and (sess.last_activity or sess.started_at or "") < since:
-                continue
-
-            if sess.display_name and query_lower in sess.display_name.lower():
-                hit_key = (h, sess.session_id)
-                if hit_key not in seen_session_hits:
-                    seen_session_hits.add(hit_key)
-                    matches.append(
-                        {
-                            "harness": h,
-                            "session_id": sess.session_id,
-                            "conversation_id": sess.conversation_id,
-                            "display_name": sess.display_name,
-                            "branch_label": sess.branch_label,
-                            "match_type": "title",
-                            "preview": sess.display_name,
-                            "timestamp": sess.last_activity or sess.started_at,
-                            "step_index": None,
-                        }
-                    )
-                if len(matches) >= limit:
-                    break
-
-            if searched_count < max_sessions_to_search:
-                searched_count += 1
-                try:
-                    steps = adapter.load_steps(
-                        session=sess,
-                        limit=50,
-                        from_end=True,
-                        include_raw_data=False,
-                        exclude_actor_roles=[ActorRole.SYSTEM],
-                    )
-                    for s in steps:
-                        hit_key = (h, sess.session_id)
-                        if hit_key in seen_session_hits:
-                            break
-                        for b in s.blocks:
-                            text_val = _extract_block_text(b)
-                            if query_lower in text_val.lower():
-                                idx = text_val.lower().find(query_lower)
-                                start = max(0, idx - 40)
-                                end = min(len(text_val), idx + len(query) + 60)
-                                preview = text_val[start:end].replace("\n", " ")
-                                seen_session_hits.add(hit_key)
-                                matches.append(
-                                    {
-                                        "harness": h,
-                                        "session_id": sess.session_id,
-                                        "conversation_id": sess.conversation_id,
-                                        "display_name": sess.display_name,
-                                        "branch_label": sess.branch_label,
-                                        "match_type": "content",
-                                        "preview": preview,
-                                        "timestamp": s.timestamp,
-                                        "step_index": s.step_index,
-                                    }
-                                )
-                                break
-                        if len(matches) >= limit:
-                            break
-                except Exception as e:
-                    logger.debug(
-                        f"Error reading steps for session {sess.session_id}: {e}"
-                    )
-                    continue
-
+    options = SearchOptions(
+        query=query,
+        queries=queries,
+        harness=harness,
+        since=since,
+        limit=limit,
+        max_sessions_to_search=max_sessions_to_search,
+        max_hits_per_session=max_hits_per_session,
+        search_scope=search_scope,
+        match_tool_names=match_tool_names,
+        include_context_steps=include_context_steps,
+        root_path=root_path,
+    )
+    matches = search_sessions(options)
     return json.dumps(
         {
             "query": query,
+            "queries": normalize_queries(query, queries),
+            "search_scope": search_scope,
             "match_count": len(matches),
             "results": matches,
         },
@@ -916,13 +846,19 @@ def codetalk_diff_branches(
     return json.dumps(payload, indent=2)
 
 
-@click.command()
+@click.group(invoke_without_command=True)
 @click.option("--transport", default="stdio", help="MCP transport mode (stdio)")
 @click.option(
     "--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)"
 )
-def main(transport: str, log_level: str) -> None:
-    """CodeTalker MCP server entrypoint."""
+@click.pass_context
+def main(ctx: click.Context, transport: str, log_level: str) -> None:
+    """CodeTalker MCP server and audit utilities."""
+    if ctx.invoked_subcommand is None:
+        _run_server(transport, log_level)
+
+
+def _run_server(transport: str, log_level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, log_level.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -931,6 +867,53 @@ def main(transport: str, log_level: str) -> None:
         asyncio.run(server.run_stdio_async())
     else:
         raise ValueError(f"Unsupported transport: {transport}")
+
+
+@main.command("audit")
+@click.option("--since", default="2026-08-22", show_default=True)
+@click.option(
+    "--search-scope",
+    type=click.Choice(["tail", "full"], case_sensitive=False),
+    default="full",
+    show_default=True,
+)
+@click.option(
+    "--queries",
+    default="codetalker,codetalk_,code talker,mcp__codetalker,user-codetalker",
+    show_default=True,
+)
+@click.option("--harness", default=None)
+@click.option("--root-path", default=None)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(path_type=Path),
+    default=".audit/codetalker-usage-hits.jsonl",
+    show_default=True,
+)
+@click.option("--include-context-steps", default=2, show_default=True)
+def audit_subcommand(
+    since: str,
+    search_scope: str,
+    queries: str,
+    harness: str | None,
+    root_path: str | None,
+    output: Path,
+    include_context_steps: int,
+) -> None:
+    """Batch-search local transcripts for CodeTalker mentions."""
+    from codetalker.audit import run_audit
+
+    summary = run_audit(
+        since=since,
+        search_scope=search_scope,
+        queries=queries,
+        harness=harness,
+        root_path=root_path,
+        output=output,
+        include_context_steps=include_context_steps,
+    )
+    click.echo(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":

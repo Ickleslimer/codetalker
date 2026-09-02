@@ -50,6 +50,9 @@ Thumbs.db
 # CodeGraph local index (regenerable)
 .codegraph/
 
+# Local audit reports (may contain transcript excerpts)
+.audit/
+
 # Agent local instructions
 agents.md
 AGENTS.md

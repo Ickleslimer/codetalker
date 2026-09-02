@@ -19,6 +19,7 @@ dev = [
 
 [project.scripts]
 codetalker = "codetalker.server:main"
+codetalker-audit = "codetalker.audit:main"
 
 [build-system]
 requires = ["hatchling"]
