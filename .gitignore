@@ -53,6 +53,9 @@ Thumbs.db
 # Local audit reports (may contain transcript excerpts)
 .audit/
 
+# Local audit helper scripts (not part of shipped tooling)
+scripts/analyze_audit_hits.py
+
 # Agent local instructions
 agents.md
 AGENTS.md
