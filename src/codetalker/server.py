@@ -12,6 +12,7 @@ from mcp.server.mcpserver import MCPServer
 import codetalker.adapters  # noqa: F401
 from codetalker.agent_guidance import (
     DECISION_TREE,
+    SERVER_INSTRUCTIONS,
     TOOL_CATALOG,
     UNSUPPORTED_TOOLS,
     build_server_metadata,
@@ -24,7 +25,7 @@ from codetalker.utils.timestamps import timestamp_gte
 
 logger = logging.getLogger("codetalker.server")
 
-server = MCPServer("codetalker")
+server = MCPServer("codetalker", instructions=SERVER_INSTRUCTIONS)
 
 PAYLOAD_WARNING_BYTES = 500_000
 
@@ -38,8 +39,11 @@ HARNESS_NOTES: dict[str, str] = {
     "antigravity": "Supports subagent branches and DAG fork points.",
     "freebuff": (
         "Full multi-turn logs from Freebuff desktop SQLite. "
-        "Use codetalk_resolve_session when the in-thread agent lost context. "
-        "MCP requires Freebuff consent sidecar approval after config changes."
+        "Freebuff can silently drop in-flight context between turns mid-thread — "
+        "on ANY turn where context is missing or a user message has no visible "
+        "antecedent, call codetalk_recover (or codetalk_read with working_directory) "
+        "BEFORE responding. MCP requires Freebuff consent sidecar approval after "
+        "config changes."
     ),
     "opencode": (
         "OpenCode sidecar transcripts live in ~/.local/share/opencode/opencode.db; "
@@ -62,6 +66,7 @@ CONTEXT_RECOVERY_PLAYBOOK: dict[str, Any] = {
         "User says 'continue' but the agent has no memory of prior turns.",
     ],
     "recommended_flow": [
+        "codetalk_recover(working_directory='<project path>') — ONE call: latest session + its most recent turns",
         "codetalk_resolve_session(working_directory='<project path>', harness='freebuff')",
         "codetalk_read(working_directory='<project path>', harness='freebuff', since_last_user_input=true)",
         "codetalk_search(query=\"can't see the session context\", harness='freebuff') to find affected threads",
@@ -69,6 +74,7 @@ CONTEXT_RECOVERY_PLAYBOOK: dict[str, Any] = {
     "notes": [
         "working_directory accepts plain paths or file:// URIs; matching is case-insensitive on Windows.",
         "codetalk_read accepts working_directory instead of session_id for one-shot recovery.",
+        "codetalk_recover is the one-call form of resolve + read — prefer it when context is missing mid-thread.",
         "Prefer since_last_user_input=true when the user just said 'continue'.",
     ],
     "decision_tree": DECISION_TREE,
@@ -513,6 +519,11 @@ def codetalk_capabilities() -> str:
             "branch_id": "Usually equals session_id for branch threads.",
         },
         "context_recovery": CONTEXT_RECOVERY_PLAYBOOK,
+        "one_call_recovery": (
+            "codetalk_recover(working_directory=...) = resolve + read recent turns "
+            "in ONE call. Use it on ANY turn with missing/wiped context or an "
+            "antecedent-less user message ('done', 'continue', 'ok') BEFORE responding."
+        ),
         "recommended_read_defaults": {
             "from_end": True,
             "conversation_only": True,
@@ -640,6 +651,104 @@ def codetalk_resolve_session(
             "working_directory to codetalk_read (optionally since_last_user_input=true)."
         ),
     }
+    return json.dumps(payload, indent=2)
+
+
+def _iso_timestamp(ts: Any) -> Any:
+    """JSON-safe timestamp: datetime -> isoformat, anything else passes through."""
+    return ts.isoformat() if hasattr(ts, "isoformat") else ts
+
+
+@server.tool(
+    name="codetalk_recover",
+    description=(
+        "ONE-CALL context recovery for any turn where context is missing, wiped, "
+        "or a user message has no visible antecedent ('done', 'continue', 'ok', "
+        "or a reply to something you cannot see). Resolves the latest session for "
+        "a working_directory and returns its most recent user turns plus the last "
+        "assistant turn in a single step. Call this BEFORE responding; do not "
+        "reconstruct history by guessing from files."
+    ),
+)
+def codetalk_recover(
+    working_directory: str,
+    harness: str | None = None,
+    root_path: str | None = None,
+    display_name: str | None = None,
+    user_turns: int = 6,
+    max_step_chars: int = 1200,
+) -> str:
+    """Resolve the latest session for a workspace and return its recent turns."""
+    adapter, session = _resolve_session_by_working_directory(
+        working_directory,
+        harness,
+        root_path=root_path,
+        display_name=display_name,
+    )
+
+    # Window sized to comfortably contain the requested user turns; steps come
+    # back oldest-first within the window, so user turns are trimmed from the
+    # front and the assistant turn overwrites forward to the most recent.
+    steps, pagination = adapter.load_steps_paginated(
+        session=session,
+        since=None,
+        until=None,
+        since_last_user_input=False,
+        exclude_actor_roles=[ActorRole.SYSTEM],
+        include_thinking=False,
+        include_raw_data=False,
+        max_step_chars=max_step_chars,
+        offset=0,
+        from_end=True,
+        limit=max(60, int(user_turns) * 8),
+    )
+
+    recent_user: list[dict[str, Any]] = []
+    last_assistant: dict[str, Any] | None = None
+    for step in steps:
+        role = step.actor.role
+        for block in step.blocks:
+            if getattr(block, "type", None) is not BlockType.TEXT:
+                continue
+            text = getattr(block, "text", None)
+            if not text:
+                continue
+            if role == ActorRole.USER:
+                recent_user.append(
+                    {
+                        "step_index": step.step_index,
+                        "timestamp": _iso_timestamp(step.timestamp),
+                        "text": text,
+                    }
+                )
+            elif role == ActorRole.ASSISTANT:
+                last_assistant = {
+                    "step_index": step.step_index,
+                    "timestamp": _iso_timestamp(step.timestamp),
+                    "text": text,
+                }
+    recent_user = recent_user[-max(int(user_turns), 1) :]
+
+    payload: dict[str, Any] = {
+        "recovered": True,
+        "working_directory_query": working_directory,
+        "session": _session_summary(session),
+        "recent_user_turns": recent_user,
+        "last_assistant_turn": last_assistant,
+        "window": {
+            "returned_step_count": len(steps),
+            "total_steps_available": pagination.total_steps_available,
+            "start_step_index": pagination.start_step_index,
+            "end_step_index": pagination.end_step_index,
+        },
+        "next_steps": (
+            "State one line of what you recovered and from when, then act. For "
+            "deeper history: codetalk_read(session_id=<session.session_id>, "
+            "offset=...) or codetalk_search(search_scope='full'). If these turns "
+            "do not explain the user's message, page further back BEFORE acting."
+        ),
+    }
+    payload.update(_payload_meta(payload))
     return json.dumps(payload, indent=2)
 
 

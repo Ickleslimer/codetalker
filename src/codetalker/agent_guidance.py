@@ -14,10 +14,35 @@ UNSUPPORTED_TOOLS: list[str] = [
     "codetalk_read_transcript",
 ]
 
+SERVER_INSTRUCTIONS: str = (
+    "Context recovery (applies to EVERY turn, not just session start): if this "
+    "turn arrives with missing, wiped, or summarized-away context — or the user's "
+    "message has no visible antecedent ('done', 'continue', 'ok', or a reply to "
+    "something you cannot see) — do NOT ask the user to re-explain and do NOT "
+    "reconstruct history from files. Call codetalk_recover with the project root "
+    "(one call: latest session + its most recent turns), state one line of what "
+    "you recovered and from when, then act. If codetalker fails or returns "
+    "nothing, say so explicitly and fall back to the project's durable records "
+    "— never silently guess. When finishing substantive work, leave a dated "
+    "record in the project's notes files so the next turn can recover it."
+)
+
 TOOL_CATALOG: dict[str, dict[str, str]] = {
     "codetalk_capabilities": {
         "use_when": "First call each agent session; learn harness names, aliases, and ID fields.",
         "do_not_use_when": "Never read MCP JSON schema files from disk instead of this tool.",
+    },
+    "codetalk_recover": {
+        "use_when": (
+            "Any turn where context is missing, wiped, or a user message has no "
+            "visible antecedent ('done', 'continue', 'ok'). One-call recovery: "
+            "resolves the latest session for a working_directory and reads its "
+            "most recent turns in a single step."
+        ),
+        "do_not_use_when": (
+            "Deep paging or targeted filtering of a known session — use "
+            "codetalk_read / codetalk_filter."
+        ),
     },
     "codetalk_resolve_session": {
         "use_when": "Agent lost in-harness context and knows the project working_directory.",
@@ -55,7 +80,21 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
 
 DECISION_TREE: list[dict[str, str]] = [
     {
-        "situation": "Lost context, know project path",
+        "situation": (
+            "ANY turn with missing/wiped context, or a user message with no visible "
+            "antecedent ('done', 'continue', 'ok')"
+        ),
+        "action": (
+            "codetalk_recover(working_directory='<project root>') — ONE call returns the "
+            "latest session plus its most recent user turns; do this BEFORE responding"
+        ),
+    },
+    {
+        "situation": "Need deeper history after codetalk_recover",
+        "action": "codetalk_read(session_id=..., offset=...) or codetalk_search(search_scope='full')",
+    },
+    {
+        "situation": "Lost context, know project path, need control over the read",
         "action": "codetalk_resolve_session(working_directory=...) → codetalk_read(since_last_user_input=true)",
     },
     {
