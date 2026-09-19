@@ -1,5 +1,9 @@
 # CodeTalker
 
+[![PyPI version](https://img.shields.io/pypi/v/codetalker-mcp.svg)](https://pypi.org/project/codetalker-mcp/)
+[![Python versions](https://img.shields.io/pypi/pyversions/codetalker-mcp.svg)](https://pypi.org/project/codetalker-mcp/)
+[![stranger-smoke CI](https://github.com/Ickleslimer/codetalker/actions/workflows/stranger-smoke.yml/badge.svg)](https://github.com/Ickleslimer/codetalker/actions/workflows/stranger-smoke.yml)
+
 > Cross-harness agent conversation transcript normalizer and MCP server.
 
 CodeTalker is an agent-callable tool and MCP server that normalizes conversation transcripts from different AI coding harnesses into a unified schema. This allows any agent to pick up context, search past decisions, or read thread history without requiring manual handoff documents.

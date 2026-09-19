@@ -240,11 +240,37 @@ def test_dry_run_is_the_default_and_touches_nothing(fake_home, known_uv):
 def test_uv_tool_mode_uses_bare_command(fake_home, known_uv):
     write_json(fake_home / ".cursor" / "mcp.json", {"mcpServers": {}})
     results = ih.install(project_root=fake_home / "repo", dry_run=False,
-                         use_tool=True, harnesses=["Cursor"])
+                         mode="tool", harnesses=["Cursor"])
     data = json.loads(
         (fake_home / ".cursor" / "mcp.json").read_text(encoding="utf-8"))
     assert data["mcpServers"]["codetalker"] == {"command": "codetalker", "args": []}
     assert any("[ok]" in r for r in results)
+
+
+def test_uvx_mode_uses_published_package(fake_home, known_uv, monkeypatch):
+    write_json(fake_home / ".cursor" / "mcp.json", {"mcpServers": {}})
+    uvx = known_uv.parent / "uvx-bin"
+    uvx.write_text("", encoding="utf-8")
+    monkeypatch.setattr(ih, "default_uvx", lambda: str(uvx))
+    ih.install(project_root=fake_home / "repo", dry_run=False,
+               mode="uvx", harnesses=["Cursor"])
+    data = json.loads(
+        (fake_home / ".cursor" / "mcp.json").read_text(encoding="utf-8"))
+    assert data["mcpServers"]["codetalker"] == {
+        "command": str(uvx), "args": ["--from", "codetalker-mcp", "codetalker"]
+    }
+
+
+def test_uvx_toml_block_in_codex(fake_home, known_uv, monkeypatch):
+    toml = fake_home / ".codex" / "config.toml"
+    toml.parent.mkdir(parents=True, exist_ok=True)
+    toml.write_text("", encoding="utf-8")
+    monkeypatch.setattr(ih, "default_uvx", lambda: "uvx")
+    ih.install(project_root=fake_home / "repo", dry_run=False,
+               mode="uvx", harnesses=["Codex"])
+    text = toml.read_text(encoding="utf-8")
+    assert 'command = "uvx"' in text
+    assert '["--from", "codetalker-mcp", "codetalker"]' in text
 
 
 def test_harness_filter_limits_targets(fake_home, known_uv):

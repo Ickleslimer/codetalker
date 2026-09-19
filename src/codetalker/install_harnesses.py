@@ -55,9 +55,33 @@ def default_uv() -> str:
     return "uv"
 
 
-def default_command(use_tool: bool, project_root: Path, uv: str | None = None) -> tuple[str, list[str]]:
-    """The canonical launch command for MCP configs."""
-    if use_tool:
+def default_uvx() -> str:
+    """Locate uvx (ships with uv): PATH first, then the usual locations."""
+    from shutil import which
+
+    found = which("uvx")
+    if found:
+        return found
+    for c in (
+        Path.home() / ".local" / "bin" / "uvx.exe",
+        Path.home() / ".local" / "bin" / "uvx",
+    ):
+        if c.is_file():
+            return str(c)
+    return "uvx"
+
+
+def default_command(mode: str, project_root: Path, uv: str | None = None) -> tuple[str, list[str]]:
+    """The canonical launch command for MCP configs.
+
+    Modes:
+      uvx   — published package, ephemeral env: uvx --from codetalker-mcp codetalker
+      tool  — bare shim from `uv tool install codetalker-mcp`: codetalker
+      local — dev checkout: uv run --project <root> codetalker
+    """
+    if mode == "uvx":
+        return default_uvx(), ["--from", "codetalker-mcp", "codetalker"]
+    if mode == "tool":
         return "codetalker", []
     uv = uv or default_uv()
     return uv, ["run", "--project", str(project_root), "codetalker"]
@@ -165,7 +189,7 @@ def update_codex_toml(path: Path, command: str, args: list[str], dry_run: bool) 
 
 def install(
     project_root: Path | None = None,
-    use_tool: bool = False,
+    mode: str = "local",
     harnesses: list[str] | None = None,
     dry_run: bool = True,
     uv: str | None = None,
@@ -175,7 +199,7 @@ def install(
         project_root = Path(__file__).resolve().parent.parent
     project_root = Path(project_root).resolve()
 
-    command, args = default_command(use_tool, project_root, uv)
+    command, args = default_command(mode, project_root, uv)
     targets = config_targets()
     if harnesses:
         wanted = {h.lower() for h in harnesses}
@@ -219,9 +243,16 @@ def main(argv: list[str] | None = None) -> int:
         help="codetalker repo path (default: parent of this package)",
     )
     parser.add_argument(
+        "--mode",
+        choices=("uvx", "tool", "local"),
+        default=None,
+        help="launch mode: uvx = published package (uvx --from codetalker-mcp), "
+             "tool = bare shim after 'uv tool install codetalker-mcp', "
+             "local = dev checkout (default: local, or tool if --uv-tool)",
+    )
+    parser.add_argument(
         "--uv-tool", action="store_true",
-        help="configure 'codetalker' on PATH (requires: uv tool install) "
-             "instead of 'uv run --project <root> codetalker'",
+        help="legacy alias for --mode tool",
     )
     parser.add_argument(
         "--harness", action="append",
@@ -233,9 +264,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     ns = parser.parse_args(argv)
 
+    mode = ns.mode
+    if mode is None:
+        mode = "tool" if ns.uv_tool else "local"
+
     for line in install(
         project_root=ns.project_root,
-        use_tool=ns.uv_tool,
+        mode=mode,
         harnesses=ns.harness,
         dry_run=not ns.write,
         uv=None,
