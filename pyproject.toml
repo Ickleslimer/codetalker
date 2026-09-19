@@ -1,11 +1,27 @@
 [project]
-name = "codetalker"
-version = "0.3.0"
+name = "codetalker-mcp"
 description = "Cross-harness agent conversation transcript normalizer and MCP server"
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Ickleslimer" },
+]
+keywords = ["mcp", "agent", "transcripts", "llm", "context-recovery", "codex", "claude", "cursor"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Communications :: Chat",
+]
+dynamic = ["version"]
 dependencies = [
-    "ccl-chromium-reader",
     "click>=8.4.2",
     "mcp>=2.0.0",
     "pydantic>=2.13.4",
@@ -17,13 +33,23 @@ dev = [
     "pytest-asyncio>=1.4.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Ickleslimer/codetalker"
+Repository = "https://github.com/Ickleslimer/codetalker"
+Issues = "https://github.com/Ickleslimer/codetalker/issues"
+Changelog = "https://github.com/Ickleslimer/codetalker/releases"
+
 [project.scripts]
 codetalker = "codetalker.server:main"
 codetalker-audit = "codetalker.audit:main"
+codetalker-install = "codetalker.install_harnesses:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv.sources]
-ccl-chromium-reader = { git = "https://github.com/cclgroupltd/ccl_chromium_reader.git" }
+[tool.hatch.version]
+path = "src/codetalker/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codetalker"]

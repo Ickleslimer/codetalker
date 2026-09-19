@@ -1,0 +1,45 @@
+name: stranger-smoke
+
+# Keeps the onboarding path honest: a fresh venv, a NON-EDITABLE install of
+# the checked-out tree (exactly what `pip install git+https://...` gives a
+# stranger, minus the network hop that would test the previous commit), a
+# full MCP handshake, and the empty-home probe.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke:
+    name: stranger smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fresh venv + non-editable install (the stranger path)
+        shell: bash
+        run: |
+          uv venv .smoke-venv --python 3.12
+          # windows runners use Scripts/, posix use bin/ — test the file
+          PY=.smoke-venv/bin/python
+          if [ -f ".smoke-venv/Scripts/python.exe" ]; then
+            PY=.smoke-venv/Scripts/python.exe
+          fi
+          uv pip install --python "$PY" .
+          echo "SMOKE_PY=$PY" >> "$GITHUB_ENV"
+
+      - name: Run stranger smoke
+        shell: bash
+        run: |
+          "$SMOKE_PY" scripts/stranger_smoke.py

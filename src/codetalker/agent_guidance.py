@@ -182,12 +182,24 @@ def _resolve_project_root() -> str | None:
         return None
 
 
-def build_server_metadata() -> dict[str, Any]:
-    pkg_version = "0.0.0"
+def _package_version() -> str:
+    """Dist name changed to codetalker-mcp for PyPI (codetalker is taken);
+    fall back through the legacy name and the package attribute."""
+    for dist_name in ("codetalker-mcp", "codetalker"):
+        try:
+            return version(dist_name)
+        except PackageNotFoundError:
+            continue
     try:
-        pkg_version = version("codetalker")
-    except PackageNotFoundError:
-        pass
+        from codetalker import __version__
+
+        return __version__
+    except Exception:
+        return "0.0.0"
+
+
+def build_server_metadata() -> dict[str, Any]:
+    pkg_version = _package_version()
 
     project_root = _resolve_project_root()
     return {

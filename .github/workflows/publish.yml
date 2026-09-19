@@ -1,0 +1,70 @@
+name: publish
+
+# Publishes codetalker-mcp to PyPI when a vX.Y.Z tag is pushed.
+#
+# Gate: the wheel must pass the stranger-install smoke (fresh venv,
+# non-editable install, handshake, empty-home probe) before anything uploads.
+#
+# Auth: PyPI Trusted Publishing (OIDC) — no API tokens stored in the repo.
+# One-time prerequisite (repo owner): on pypi.org, under
+# project/codetalker-mcp/manage/publishing, register a pending publisher:
+#   owner=Ickleslimer  repo=codetalker  workflow=publish.yml
+#   environment=pypi
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tag/version consistency guard
+        run: |
+          VERSION=$(grep -oP '(?<=__version__ = ")[^"]+' src/codetalker/__init__.py)
+          echo "__version__=$VERSION ref=$GITHUB_REF"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG=${GITHUB_REF_NAME#v}
+            if [ "$TAG" != "$VERSION" ]; then
+              echo "::error::tag v$TAG does not match __version__ $VERSION"
+              exit 1
+            fi
+          fi
+
+      - name: Build sdist + wheel
+        run: uv build --out-dir dist
+
+      - name: Wheel smoke gate (fresh venv, non-editable install)
+        run: |
+          uv venv .smoke-venv --python 3.12
+          WHEEL=$(ls dist/*.whl)
+          uv pip install --python .smoke-venv/bin/python "$WHEEL"
+          .smoke-venv/bin/python scripts/stranger_smoke.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # trusted publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

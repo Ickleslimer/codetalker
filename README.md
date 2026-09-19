@@ -6,6 +6,15 @@ CodeTalker is an agent-callable tool and MCP server that normalizes conversation
 
 ---
 
+> [!IMPORTANT]
+> **Privacy: read-only, local-only, no telemetry.**
+> CodeTalker **reads** your agent harnesses' local conversation history and nothing else.
+> - **Read-only by construction.** Every harness database it touches (Cursor, Freebuff, OpenCode, Windsurf/Devin) is opened in SQLite read-only mode (`?mode=ro`) — the driver itself refuses writes, so a bug in CodeTalker cannot modify your sessions. It writes no config files, keeps no cache, stores no state of its own.
+> - **What it touches.** Only the harnesses' own storage directories listed in the [support table below](#supported-harnesses--verification-status) (e.g. `~/.codex/sessions`, `~/.config/freebuff-desktop`, `%APPDATA%/Cursor`), plus local OpenCode desktop logs to discover that app's local server port. Nothing on your machine is modified.
+> - **Nothing is sent anywhere.** The server speaks stdio only — it talks exclusively to the agent harness that launched it, on your machine. There is no telemetry, no analytics, no update checks. The one network-shaped exception is disclosed: the OpenCode sidecar adapter may issue a **local** HTTP GET to your own running OpenCode desktop app (port discovered from that app's local logs) to read session messages. No transcript data ever leaves your machine via CodeTalker — it leaves only if the agent harness you use sends tool results to its own model backend, which is outside CodeTalker's control.
+
+---
+
 ## Capabilities & Schema
 
 - **Normalized Intermediate Format**: Standardized `TextBlock`, `ThinkingBlock`, `ToolCallBlock`, `ToolResultBlock`, `CodeDiffBlock`, `AttachmentBlock`, `ApprovalBlock`, `SystemEventBlock`.
@@ -121,7 +130,44 @@ Since v0.3 the recovery mandate is **trigger-gated and per-client**:
 
 ## Installation & Setup
 
-### Running locally
+### Install from PyPI
+
+Published as **`codetalker-mcp`** (the name `codetalker` on PyPI belongs to an
+unrelated 2014 package):
+
+```bash
+pip install codetalker-mcp
+# or
+uv tool install codetalker-mcp
+```
+
+MCP config entries then need no repo path:
+
+```json
+{
+  "mcpServers": {
+    "codetalker": {
+      "command": "uvx",
+      "args": ["--from", "codetalker-mcp", "codetalker"]
+    }
+  }
+}
+```
+
+> [!NOTE]
+> **ChatGPT Desktop adapter dependency.** The ChatGPT Desktop (IndexedDB/LevelDB)
+> adapter relies on `ccl-chromium-reader`, which is **only available from GitHub**
+> (it has no PyPI package, so it cannot be a pip dependency). Every other adapter
+> works out of the box. To enable ChatGPT Desktop support:
+>
+> ```bash
+> pip install "git+https://github.com/cclgroupltd/ccl_chromium_reader.git"
+> ```
+>
+> Without it, that one adapter reports `registered: false` / fails gracefully;
+> Codex CLI rollouts (harness `codex`/`chatgpt`) are unaffected.
+
+### Running locally (development)
 ```bash
 uv sync
 uv run pytest -v
@@ -157,6 +203,32 @@ Limit to specific harnesses: `-Harness Cursor,Codex`. Preview changes: `-WhatIf`
 
 After running, restart each harness and call `codetalk_capabilities` — confirm `server.project_root` matches your install.
 
+### Cross-platform installer (macOS / Linux / any OS)
+
+The same wiring logic ships as a stdlib-only Python entry point — usable immediately
+after `pip install git+https://github.com/Ickleslimer/codetalker.git`, no PowerShell
+required:
+
+```bash
+# preview what would change (default; modifies nothing)
+codetalker-install --project-root /path/to/codetalker
+
+# apply
+codetalker-install --project-root /path/to/codetalker --write
+
+# uv tool users (after: uv tool install /path/to/codetalker)
+codetalker-install --uv-tool --write
+```
+
+Targets are the same as the PowerShell script (Cursor, Antigravity, Claude Desktop,
+Codex TOML); existing `codetalker` entries are replaced in place, other MCP servers
+are preserved, every modified file gets a one-shot `.bak` backup, and CRLF line
+endings survive on Windows-written configs. The Claude Desktop config resolves to
+`%APPDATA%\Claude\claude_desktop_config.json` on Windows and
+`~/.claude/claude_desktop_config.json` elsewhere. Freebuff stays manual on every
+platform (client-managed consent sidecar). On Windows, either installer works; the
+PowerShell variant additionally offers `uv tool install` integration.
+
 ### Adding to MCP Configuration (manual)
 
 In your agent harness MCP config (e.g., Antigravity, Claude Desktop, Cursor):
@@ -175,4 +247,34 @@ In your agent harness MCP config (e.g., Antigravity, Claude Desktop, Cursor):
     }
   }
 }
+```
+
+### Development: the stranger-install smoke
+
+CI (`.github/workflows/stranger-smoke.yml`) keeps the onboarding path honest on
+every push/PR: on ubuntu, macos, and windows runners it creates a **fresh venv**,
+installs the checked-out tree **non-editable** (exactly what
+`pip install git+https://github.com/Ickleslimer/codetalker.git` gives a stranger —
+CI deliberately installs from the tree rather than the GitHub URL, which would test
+the *previous* commit on push events), then runs `scripts/stranger_smoke.py`:
+
+- stdio handshake + full tool catalog (core 8 tools present)
+- v0.3 per-client instruction tailoring (freebuff mandate vs. short fallback)
+- `codetalk_capabilities` answers, and its version matches the installed dist
+- **empty-home probe**: with `HOME`/`USERPROFILE`/`APPDATA`/`XDG_*` redirected to
+  an empty temp dir, capabilities and list answer gracefully (`count: 0`)
+
+Run the same check locally against your editable install (skips the fresh-venv
+step but exercises the identical assertions):
+
+```bash
+uv pip install . && python scripts/stranger_smoke.py
+```
+
+Or replicate CI exactly:
+
+```bash
+uv venv .smoke-venv --python 3.12
+uv pip install --python .smoke-venv/Scripts/python.exe .   # bin/python on posix
+.smoke-venv/Scripts/python.exe scripts/stranger_smoke.py
 ```
