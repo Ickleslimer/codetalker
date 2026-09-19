@@ -1,0 +1,269 @@
+"""Fresh-session detection and continue-token anchoring (codetalker v0.3).
+
+Context loss arrives in two classes, and they need different mechanisms:
+
+LOUD wipes — harness restarts and failed turns — inject visible markers into
+the persisted transcript (``<since_your_last_turn>``, ``<failed_turn>``, and
+system notices about a session ending mid-response). :func:`detect_session_fresh`
+classifies those mechanically from the last N steps; no model judgment.
+
+SILENT wipes — context dropped at a message boundary mid-session — leave no
+transcript artifact at all. No external tool can detect them from disk, so
+detection stays with the model (the antecedent check). What this module adds
+is verifiability: :func:`emit_continue_token` produces a one-line anchor the
+agent appends to every finished turn, and :func:`verify_continue_token` proves
+— or refutes — the agent's claimed memory against the transcript on disk.
+
+The token is an integrity anchor, not a secret: the signature detects
+accidental truncation or editing, and the version constant is bumped when the
+payload format changes.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from dataclasses import dataclass, field
+from typing import Any, Sequence
+
+from codetalker.schema import ActorRole, BlockType, NormalizedStep
+
+# ─── LOUD-wipe detection ─────────────────────────────────────────────────────
+
+# Substrings observed in real persisted transcripts when the harness restarts
+# mid-thread or a turn fails. Matched against user- and system-role text only;
+# assistant or tool text quoting these strings (e.g. in notes) must NOT trip
+# the detector.
+RESTART_MARKERS: tuple[str, ...] = (
+    "<since_your_last_turn>",
+    "<failed_turn>",
+    "Freebuff could not complete the previous turn",
+    "The session ended before this response completed",
+)
+
+DEFAULT_SCAN_WINDOW = 60
+
+
+def extract_step_text(step: NormalizedStep) -> str:
+    """Concatenated TEXT-block content of a step ("" when none)."""
+    parts: list[str] = []
+    for block in step.blocks:
+        if getattr(block, "type", None) is BlockType.TEXT:
+            text = getattr(block, "text", None)
+            if text:
+                parts.append(text)
+    return "\n".join(parts)
+
+
+@dataclass
+class FreshnessReport:
+    """Mechanical classification of whether the latest turn started fresh."""
+
+    is_fresh: bool
+    signal: str
+    marker_step_index: int | None = None
+    steps_scanned: int = 0
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "is_fresh": self.is_fresh,
+            "signal": self.signal,
+            "marker_step_index": self.marker_step_index,
+            "steps_scanned": self.steps_scanned,
+        }
+
+
+def detect_session_fresh(
+    steps: Sequence[NormalizedStep],
+    scan_window: int = DEFAULT_SCAN_WINDOW,
+) -> FreshnessReport:
+    """Scan the transcript tail for harness wipe markers.
+
+    Only USER- and SYSTEM-role steps are examined: the harness injects its
+    restart/failure notices into those positions. Steps are scanned newest
+    last; the report records the newest matching step index.
+    """
+    tail = list(steps)[-max(int(scan_window), 1) :]
+    report = FreshnessReport(is_fresh=False, signal="none", steps_scanned=len(tail))
+    for step in tail:
+        if step.actor.role not in (ActorRole.USER, ActorRole.SYSTEM):
+            continue
+        text = extract_step_text(step)
+        if not text:
+            continue
+        for marker in RESTART_MARKERS:
+            if marker in text:
+                report.is_fresh = True
+                report.signal = "restart_or_failure_marker"
+                report.marker_step_index = step.step_index
+    return report
+
+
+# ─── SILENT-wipe anchoring (continue token) ──────────────────────────────────
+
+CONTINUE_TOKEN_PREFIX = "codetalker-v3-continue"
+CONTINUITY_MODE = "codetalker-v3"
+# Version salt for the integrity signature. Bump when the payload fields change
+# so stale tokens fail verification instead of half-matching.
+_TOKEN_SECRET_V1 = "codetalker-continue-token-v1"
+
+_TOKEN_LINE_RE = re.compile(
+    re.escape(CONTINUE_TOKEN_PREFIX) + r"\s*(\{.*\})", re.IGNORECASE | re.DOTALL
+)
+
+
+@dataclass
+class ContinueToken:
+    session_id: str | None = None
+    working_directory: str | None = None
+    last_user_step_index: int | None = None
+    total_steps: int | None = None
+    last_user_text: str = ""
+    continuity_mode: str = CONTINUITY_MODE
+
+
+@dataclass
+class AnchorCheck:
+    matches: bool
+    reason: str
+
+
+def _token_signature(token: ContinueToken) -> str:
+    payload = "|".join(
+        str(part)
+        for part in (
+            _TOKEN_SECRET_V1,
+            token.session_id or "",
+            token.working_directory or "",
+            token.last_user_step_index if token.last_user_step_index is not None else "",
+            token.total_steps if token.total_steps is not None else "",
+            token.last_user_text,
+            token.continuity_mode,
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def emit_continue_token(
+    *,
+    session_id: str | None,
+    working_directory: str | None,
+    last_user_step_index: int | None,
+    total_steps: int | None,
+    last_user_text: str,
+) -> str:
+    """One-line anchor the agent appends verbatim to each finished turn.
+
+    Keeps the final user text short: the token rides along in the transcript
+    every turn, so it carries an anchor (prefix), not the content itself.
+    """
+    anchor = (last_user_text or "").strip().replace("\n", " ")[:80]
+    token = ContinueToken(
+        session_id=session_id,
+        working_directory=working_directory,
+        last_user_step_index=last_user_step_index,
+        total_steps=total_steps,
+        last_user_text=anchor,
+    )
+    body = {
+        "session_id": token.session_id,
+        "working_directory": token.working_directory,
+        "last_user_step_index": token.last_user_step_index,
+        "total_steps": token.total_steps,
+        "last_user_text": token.last_user_text,
+        "continuity_mode": token.continuity_mode,
+        "sig": _token_signature(token),
+    }
+    return f"{CONTINUE_TOKEN_PREFIX} {json.dumps(body, ensure_ascii=False, separators=(',', ':'))}"
+
+
+def parse_continue_token(text: str) -> ContinueToken | None:
+    """Extract the newest continue-token line from arbitrary turn text.
+
+    Returns None when absent, truncated, edited, or signature-invalid — the
+    caller treats any of those exactly like "no token claimed".
+    """
+    if not text or CONTINUE_TOKEN_PREFIX not in text:
+        return None
+    match = None
+    for match in _TOKEN_LINE_RE.finditer(text):
+        pass  # keep the last occurrence
+    if match is None:
+        return None
+    try:
+        body = json.loads(match.group(1))
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    token = ContinueToken(
+        session_id=body.get("session_id"),
+        working_directory=body.get("working_directory"),
+        last_user_step_index=body.get("last_user_step_index"),
+        total_steps=body.get("total_steps"),
+        last_user_text=body.get("last_user_text") or "",
+        continuity_mode=body.get("continuity_mode") or CONTINUITY_MODE,
+    )
+    if body.get("sig") != _token_signature(token):
+        return None
+    return token
+
+
+def verify_continue_token(
+    token: ContinueToken | None,
+    steps: Sequence[NormalizedStep],
+    *,
+    session_id: str | None = None,
+    total_steps: int | None = None,
+) -> AnchorCheck:
+    """Compare a claimed anchor against the transcript on disk.
+
+    Transcripts are append-only, so the anchor matches when the session is the
+    same (when both sides know their IDs), the transcript is at least as long
+    as the anchor claims, and the anchored user text is still present at or
+    before its recorded position. ``total_steps`` lets a caller compare against
+    the whole-session count (pagination) instead of ``len(steps)`` when the
+    passed steps are only a recent window.
+    """
+    if token is None:
+        return AnchorCheck(matches=False, reason="no token claimed")
+    if token.continuity_mode != CONTINUITY_MODE:
+        return AnchorCheck(
+            matches=False, reason=f"unknown continuity_mode {token.continuity_mode!r}"
+        )
+    if session_id and token.session_id and token.session_id != session_id:
+        return AnchorCheck(
+            matches=False, reason="token session_id differs from resolved session"
+        )
+    effective_total = total_steps if total_steps is not None else len(steps)
+    if token.total_steps is not None and effective_total < token.total_steps:
+        return AnchorCheck(
+            matches=False,
+            reason=(
+                f"transcript has {effective_total} steps, token claims "
+                f"{token.total_steps}"
+            ),
+        )
+    if token.last_user_step_index is not None and token.last_user_text:
+        upper = token.last_user_step_index
+        candidates = [s for s in steps if s.step_index <= upper and s.actor.role == ActorRole.USER]
+        for step in reversed(candidates):
+            text = extract_step_text(step)
+            if token.last_user_text and token.last_user_text in text:
+                return AnchorCheck(matches=True, reason="anchor found in transcript")
+        return AnchorCheck(
+            matches=False,
+            reason="anchored user text not found at or before the recorded step",
+        )
+    return AnchorCheck(matches=True, reason="structural anchor consistent")
+
+
+def instruction_block(report: FreshnessReport) -> str:
+    """Short directive string derived from a freshness report (for tool docs)."""
+    if report.is_fresh:
+        return (
+            "RESTART/FAILURE MARKERS detected in the transcript tail: the "
+            "in-harness context for earlier turns is gone. Recover, state one "
+            "line of what you recovered, then act."
+        )
+    return "No restart markers found; treat context as intact unless the antecedent check fails."

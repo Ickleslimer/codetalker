@@ -108,6 +108,15 @@ Cross-harness recovery works too: open any harness with CodeTalker MCP configure
 
 `codetalk_capabilities` returns the full recovery playbook in `context_recovery`.
 
+#### v0.3: trigger-gated recovery + continue tokens
+
+Since v0.3 the recovery mandate is **trigger-gated and per-client**:
+
+- **Per-client instructions.** The handshake tailors `instructions` to the connecting client (via `clientInfo.name`): harnesses with known mid-thread context loss (Freebuff) receive the full marker-gated mandate; every other harness receives a short fallback. Healthy turns on any harness do **zero** recovery work.
+- **Mechanical wipe markers.** Restart/failed-turn notices (`<since_your_last_turn>`, `<failed_turn>`, session-ended system notices) are detected in the transcript tail — no model judgment required for the loud class of wipes.
+- **Continue tokens.** `codetalk_recover` now returns a `continue_token` line (`codetalker-v3-continue {…}`): an integrity-signed anchor (session, working directory, last user turn, transcript length). Agents end substantive turns with it; a later wiped turn passes it back as `claimed_token`, and the server verifies the agent's memory against the transcript on disk — anchors that were silently dropped or edited fail verification. `codetalk_recover_token` is the verification-only form. Silent mid-session wipes leave no transcript artifact, so their detection stays with the antecedent check — the token makes the recovery **verifiable** instead of guessed.
+- **Freebuff consent sidecar.** `codetalk_recover_token` is new, so Freebuff requires a one-time tool re-approval in the Freebuff UI (remove and re-add the codetalker server) before the tool is callable there.
+
 ---
 
 ## Installation & Setup

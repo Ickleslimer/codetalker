@@ -4,13 +4,19 @@ from pathlib import Path
 import pytest
 
 import codetalker.server as server_module
-from codetalker.agent_guidance import SERVER_INSTRUCTIONS, TOOL_CATALOG
+from codetalker.agent_guidance import (
+    SERVER_INSTRUCTIONS,
+    SERVER_INSTRUCTIONS_FALLBACK,
+    TOOL_CATALOG,
+    select_instructions,
+)
 from codetalker.server import (
     SessionLookupError,
     codetalk_capabilities,
     codetalk_list,
     codetalk_read,
     codetalk_recover,
+    codetalk_recover_token,
     codetalk_resolve_session,
 )
 
@@ -127,10 +133,31 @@ def test_codetalk_recover_missing_session_raises():
         )
 
 
-def test_server_instructions_mandate_per_turn_recovery():
-    assert "EVERY turn" in SERVER_INSTRUCTIONS
+def test_server_instructions_are_trigger_gated():
+    # v0.3: the mandate fires on triggers, not on every healthy turn.
     assert "codetalk_recover" in SERVER_INSTRUCTIONS
+    assert "codetalker-v3-continue" in SERVER_INSTRUCTIONS
     assert server_module.server.instructions == SERVER_INSTRUCTIONS
+
+
+def test_instructions_tailored_by_client():
+    assert select_instructions("freebuff") is SERVER_INSTRUCTIONS
+    assert select_instructions("Freebuff Desktop") is SERVER_INSTRUCTIONS
+    assert select_instructions("claude-desktop") is SERVER_INSTRUCTIONS_FALLBACK
+    assert select_instructions(None) is SERVER_INSTRUCTIONS_FALLBACK
+    assert "codetalk_recover" in SERVER_INSTRUCTIONS_FALLBACK
+
+
+def test_codetalk_recover_token_tool_registered():
+    assert "codetalk_recover_token" in TOOL_CATALOG
+
+
+def test_initialize_tailoring_patch_is_active():
+    # v0.3: importing the server patches ServerRunner._handle_initialize so
+    # each connection's handshake result is tailored to its clientInfo name.
+    from mcp.server.runner import ServerRunner
+
+    assert getattr(ServerRunner._handle_initialize, "_codetalker_tailored", False) is True
 
 
 def test_tool_catalog_features_codetalk_recover():

@@ -13,9 +13,19 @@ import codetalker.adapters  # noqa: F401
 from codetalker.agent_guidance import (
     DECISION_TREE,
     SERVER_INSTRUCTIONS,
+    SERVER_INSTRUCTIONS_FALLBACK,
     TOOL_CATALOG,
     UNSUPPORTED_TOOLS,
     build_server_metadata,
+    select_instructions,
+)
+from codetalker.continuity import (
+    AnchorCheck,
+    ContinueToken,
+    detect_session_fresh,
+    emit_continue_token,
+    parse_continue_token,
+    verify_continue_token,
 )
 from codetalker.registry import registry
 from codetalker.schema import ActorRole, BlockType, NormalizedSession, NormalizedStep
@@ -26,6 +36,48 @@ from codetalker.utils.timestamps import timestamp_gte
 logger = logging.getLogger("codetalker.server")
 
 server = MCPServer("codetalker", instructions=SERVER_INSTRUCTIONS)
+
+
+def _tailor_initialize_result() -> None:
+    """Rewrite the handshake result's instructions per connecting client (v0.3).
+
+    `ServerRunner.init_options` is snapshotted per-connection BEFORE any message
+    flows, so nothing that mutates server state during the handshake can change
+    the result — the only live seam is the result object itself, built by
+    `ServerRunner._handle_initialize` from the initialize params (which carry
+    `clientInfo`). Patching that static method lets each connection receive
+    instructions tailored to its client identity while leaving everything else
+    byte-identical.
+    """
+    from mcp.server.runner import ServerRunner
+
+    if getattr(ServerRunner._handle_initialize, "_codetalker_tailored", False):
+        return
+
+    _original = ServerRunner._handle_initialize
+
+    def _tailored(self, params):
+        result = _original(self, params)
+        client_name = None
+        try:
+            info = (params or {}).get("clientInfo")
+            if isinstance(info, dict):
+                client_name = info.get("name")
+        except Exception:  # noqa: BLE001 - never break a handshake on probes
+            client_name = None
+        try:
+            result.instructions = select_instructions(client_name)
+        except Exception:  # noqa: BLE001
+            pass
+        return result
+
+    _tailored._codetalker_tailored = True  # type: ignore[attr-defined]
+    ServerRunner._handle_initialize = _tailored  # type: ignore[method-assign]
+
+
+# Apply at import so every connection mode (stdio, SSE, streamable-http)
+# inherits the per-client tailoring.
+_tailor_initialize_result()
 
 PAYLOAD_WARNING_BYTES = 500_000
 
@@ -39,11 +91,12 @@ HARNESS_NOTES: dict[str, str] = {
     "antigravity": "Supports subagent branches and DAG fork points.",
     "freebuff": (
         "Full multi-turn logs from Freebuff desktop SQLite. "
-        "Freebuff can silently drop in-flight context between turns mid-thread — "
-        "on ANY turn where context is missing or a user message has no visible "
-        "antecedent, call codetalk_recover (or codetalk_read with working_directory) "
-        "BEFORE responding. MCP requires Freebuff consent sidecar approval after "
-        "config changes."
+        "Freebuff drops in-flight context between turns mid-thread — on restarts "
+        "(visible <since_your_last_turn>/<failed_turn> markers) and silently at "
+        "message boundaries. Recovery is trigger-gated (v0.3): call "
+        "codetalk_recover on a marker or an antecedent-less message only; end "
+        "substantive turns with the codetalker-v3-continue line it returns. "
+        "MCP requires Freebuff consent sidecar approval after config changes."
     ),
     "opencode": (
         "OpenCode sidecar transcripts live in ~/.local/share/opencode/opencode.db; "
@@ -64,6 +117,7 @@ CONTEXT_RECOVERY_PLAYBOOK: dict[str, Any] = {
     "symptoms": [
         "Assistant says it cannot see session context and asks to continue blindly.",
         "User says 'continue' but the agent has no memory of prior turns.",
+        "A turn arrives containing <since_your_last_turn> or <failed_turn> markers.",
     ],
     "recommended_flow": [
         "codetalk_recover(working_directory='<project path>') — ONE call: latest session + its most recent turns",
@@ -76,6 +130,8 @@ CONTEXT_RECOVERY_PLAYBOOK: dict[str, Any] = {
         "codetalk_read accepts working_directory instead of session_id for one-shot recovery.",
         "codetalk_recover is the one-call form of resolve + read — prefer it when context is missing mid-thread.",
         "Prefer since_last_user_input=true when the user just said 'continue'.",
+        "Recovery is trigger-gated (v0.3): markers or antecedent-less messages trigger; healthy turns do nothing.",
+        "Pass the last codetalker-v3-continue line as claimed_token to have memory verified, not guessed.",
     ],
     "decision_tree": DECISION_TREE,
 }
@@ -519,6 +575,15 @@ def codetalk_capabilities() -> str:
             "branch_id": "Usually equals session_id for branch threads.",
         },
         "context_recovery": CONTEXT_RECOVERY_PLAYBOOK,
+        "continuity_v3": (
+            "Recovery is trigger-gated: call codetalk_recover only on a wipe "
+            "marker (<since_your_last_turn>, <failed_turn>) or an antecedent-less "
+            "user message — never on healthy turns. End every substantive turn "
+            "with the codetalker-v3-continue line codetalk_recover returns; a "
+            "later wiped turn passes it back as claimed_token to have memory "
+            "verified against the transcript (codetalk_recover_token = "
+            "verification only)."
+        ),
         "one_call_recovery": (
             "codetalk_recover(working_directory=...) = resolve + read recent turns "
             "in ONE call. Use it on ANY turn with missing/wiped context or an "
@@ -666,8 +731,12 @@ def _iso_timestamp(ts: Any) -> Any:
         "or a user message has no visible antecedent ('done', 'continue', 'ok', "
         "or a reply to something you cannot see). Resolves the latest session for "
         "a working_directory and returns its most recent user turns plus the last "
-        "assistant turn in a single step. Call this BEFORE responding; do not "
-        "reconstruct history by guessing from files."
+        "assistant turn in a single step. Trigger-gated: a wipe marker "
+        "(<since_your_last_turn>, <failed_turn>) or an antecedent-less message "
+        "is the trigger — healthy turns need no call. Pass claimed_token (your "
+        "last codetalker-v3-continue line) to have your memory verified against "
+        "the transcript. The response includes a fresh token line: end your "
+        "turn with it."
     ),
 )
 def codetalk_recover(
@@ -677,6 +746,7 @@ def codetalk_recover(
     display_name: str | None = None,
     user_turns: int = 6,
     max_step_chars: int = 1200,
+    claimed_token: str | None = None,
 ) -> str:
     """Resolve the latest session for a workspace and return its recent turns."""
     adapter, session = _resolve_session_by_working_directory(
@@ -686,6 +756,18 @@ def codetalk_recover(
         display_name=display_name,
     )
 
+    anchor_check: AnchorCheck | None = None
+    token: ContinueToken | None = None
+    if claimed_token:
+        token = parse_continue_token(claimed_token)
+        if token is None:
+            anchor_check = AnchorCheck(
+                matches=False,
+                reason=(
+                    "claimed_token is absent, malformed, or signature-invalid — "
+                    "treat your memory as unverified"
+                ),
+            )
     # Window sized to comfortably contain the requested user turns; steps come
     # back oldest-first within the window, so user turns are trimmed from the
     # front and the assistant turn overwrites forward to the most recent.
@@ -729,6 +811,27 @@ def codetalk_recover(
                 }
     recent_user = recent_user[-max(int(user_turns), 1) :]
 
+    # Mechanical freshness classification over the scanned window — turns the
+    # harness restarted or failed mid-response carry visible markers.
+    freshness = detect_session_fresh(steps)
+
+    if anchor_check is None and token is not None:
+        anchor_check = verify_continue_token(
+            token,
+            steps,
+            session_id=session.session_id,
+            total_steps=pagination.total_steps_available,
+        )
+
+    last_user_text = recent_user[-1]["text"] if recent_user else ""
+    continue_token_line = emit_continue_token(
+        session_id=session.session_id,
+        working_directory=working_directory,
+        last_user_step_index=recent_user[-1]["step_index"] if recent_user else None,
+        total_steps=pagination.total_steps_available,
+        last_user_text=last_user_text,
+    )
+
     payload: dict[str, Any] = {
         "recovered": True,
         "working_directory_query": working_directory,
@@ -741,15 +844,90 @@ def codetalk_recover(
             "start_step_index": pagination.start_step_index,
             "end_step_index": pagination.end_step_index,
         },
+        "freshness": freshness.to_payload(),
+        "memory_check": (
+            {
+                "claimed": True,
+                "matches": anchor_check.matches,
+                "reason": anchor_check.reason,
+            }
+            if anchor_check
+            else {"claimed": False}
+        ),
+        "continue_token": continue_token_line,
         "next_steps": (
             "State one line of what you recovered and from when, then act. For "
             "deeper history: codetalk_read(session_id=<session.session_id>, "
             "offset=...) or codetalk_search(search_scope='full'). If these turns "
-            "do not explain the user's message, page further back BEFORE acting."
+            "do not explain the user's message, page further back BEFORE acting. "
+            "END YOUR TURN with the continue_token line above, appended verbatim."
         ),
     }
     payload.update(_payload_meta(payload))
     return json.dumps(payload, indent=2)
+
+
+@server.tool(
+    name="codetalk_recover_token",
+    description=(
+        "Verify a codetalker-v3-continue anchor against the transcript on disk "
+        "without loading full turns. Pass the token line from your last finished "
+        "turn plus the project working_directory. Use when you need to confirm "
+        "your memory is real before acting on it; codetalk_recover is the "
+        "fuller form (recent turns plus a fresh token)."
+    ),
+)
+def codetalk_recover_token(
+    working_directory: str,
+    claimed_token: str,
+    harness: str | None = None,
+    root_path: str | None = None,
+    display_name: str | None = None,
+) -> str:
+    """Verify the agent's claimed continue anchor against stored history."""
+    adapter, session = _resolve_session_by_working_directory(
+        working_directory,
+        harness,
+        root_path=root_path,
+        display_name=display_name,
+    )
+    token = parse_continue_token(claimed_token or "")
+    if token is None:
+        check = AnchorCheck(
+            matches=False,
+            reason="token absent, malformed, or signature-invalid",
+        )
+    else:
+        steps, pagination = adapter.load_steps_paginated(
+            session=session,
+            since=None,
+            until=None,
+            since_last_user_input=False,
+            exclude_actor_roles=[ActorRole.SYSTEM],
+            include_thinking=False,
+            include_raw_data=False,
+            max_step_chars=400,
+            offset=0,
+            from_end=True,
+            limit=200,
+        )
+        check = verify_continue_token(
+            token,
+            steps,
+            session_id=session.session_id,
+            total_steps=pagination.total_steps_available,
+        )
+    return json.dumps(
+        {
+            "session": _session_summary(session),
+            "memory_check": {
+                "claimed": True,
+                "matches": check.matches,
+                "reason": check.reason,
+            },
+        },
+        indent=2,
+    )
 
 
 @server.tool(

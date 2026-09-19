@@ -1,6 +1,6 @@
 [project]
 name = "codetalker"
-version = "0.1.0"
+version = "0.3.0"
 description = "Cross-harness agent conversation transcript normalizer and MCP server"
 readme = "README.md"
 requires-python = ">=3.12"

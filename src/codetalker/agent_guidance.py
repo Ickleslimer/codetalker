@@ -14,18 +14,59 @@ UNSUPPORTED_TOOLS: list[str] = [
     "codetalk_read_transcript",
 ]
 
+# Full instructions for harnesses with known mid-thread context loss (Freebuff,
+# per HARNESS_NOTES): marker-gated so healthy turns do ZERO recovery work.
 SERVER_INSTRUCTIONS: str = (
-    "Context recovery (applies to EVERY turn, not just session start): if this "
-    "turn arrives with missing, wiped, or summarized-away context — or the user's "
-    "message has no visible antecedent ('done', 'continue', 'ok', or a reply to "
-    "something you cannot see) — do NOT ask the user to re-explain and do NOT "
-    "reconstruct history from files. Call codetalk_recover with the project root "
-    "(one call: latest session + its most recent turns), state one line of what "
-    "you recovered and from when, then act. If codetalker fails or returns "
-    "nothing, say so explicitly and fall back to the project's durable records "
-    "— never silently guess. When finishing substantive work, leave a dated "
-    "record in the project's notes files so the next turn can recover it."
+    "Context recovery, marker-gated (v0.3): call codetalk_recover ONLY when a "
+    "trigger fires, never on healthy turns. Triggers: (1) this turn contains a "
+    "harness marker such as <since_your_last_turn> or <failed_turn> — those "
+    "mean prior context was wiped even if the transcript looks continuous; "
+    "(2) the user's message has no visible antecedent ('done', 'continue', 'ok', "
+    "or a reply to something you cannot see); (3) you find yourself about to "
+    "ask the user to re-explain. On a trigger: do NOT reconstruct from files — "
+    "call codetalk_recover with the project root, and pass your claimed_token "
+    "(the codetalker-v3-continue line from your last finished turn) so the tool "
+    "can verify your memory against the transcript. If you have no token, say "
+    "so — do not invent one. State one line of what you recovered and from "
+    "when, then act. If codetalker fails or returns nothing, say so and fall "
+    "back to the project's durable records. When finishing ANY substantive "
+    "turn, end with the codetalker-v3-continue line codetalk_recover gave you "
+    "— it is the anchor the next wiped turn verifies against."
 )
+
+# Fallback for harnesses with no known mid-thread loss behavior: short, so the
+# mandate is not paid on every turn everywhere.
+SERVER_INSTRUCTIONS_FALLBACK: str = (
+    "codetalker gives cross-harness transcript access. If a user message has no "
+    "visible antecedent ('done', 'continue', 'ok') and context is missing, one "
+    "codetalk_recover call with the project root recovers the latest session — "
+    "do not ask the user to re-explain. Optionally end substantive turns with "
+    "the codetalker-v3-continue line it returns, so any later wipe is "
+    "verifiable rather than guessed at."
+)
+
+# Kept for backward compatibility with tests/tools that expect the strict
+# per-turn mandate; runtime selection happens in select_instructions below.
+SERVER_INSTRUCTIONS_STRICT = SERVER_INSTRUCTIONS
+
+
+def select_instructions(client_name: str | None) -> str:
+    """Tailor server instructions to the connecting client.
+
+    Full marker-gated mandate only for harnesses known to drop in-flight
+    context mid-thread; everyone else gets the short fallback.
+    """
+    if client_name and any(
+        frag in client_name.lower() for frag in CLIENT_MARKERS
+    ):
+        return SERVER_INSTRUCTIONS
+    return SERVER_INSTRUCTIONS_FALLBACK
+
+
+# Substrings of MCP clientInfo.name values that identify context-loss-prone
+# harnesses. Freebuff's client identifies as freebuff; extend as evidence
+# accumulates (see HARNESS_NOTES for the current catalog).
+CLIENT_MARKERS: tuple[str, ...] = ("freebuff",)
 
 TOOL_CATALOG: dict[str, dict[str, str]] = {
     "codetalk_capabilities": {
@@ -34,14 +75,26 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
     },
     "codetalk_recover": {
         "use_when": (
-            "Any turn where context is missing, wiped, or a user message has no "
-            "visible antecedent ('done', 'continue', 'ok'). One-call recovery: "
-            "resolves the latest session for a working_directory and reads its "
-            "most recent turns in a single step."
+            "Trigger-gated (v0.3): a turn carrying a wipe marker "
+            "(<since_your_last_turn>, <failed_turn>), an antecedent-less user "
+            "message ('done', 'continue', 'ok'), or any missing/wiped context. "
+            "One call resolves the latest session for a working_directory and "
+            "returns its most recent turns plus a fresh continue token."
         ),
         "do_not_use_when": (
-            "Deep paging or targeted filtering of a known session — use "
-            "codetalk_read / codetalk_filter."
+            "Healthy turns with intact context — recovery is trigger-gated, so "
+            "a normal turn needs NO recovery call. For deep paging of a known "
+            "session use codetalk_read / codetalk_filter."
+        ),
+    },
+    "codetalk_recover_token": {
+        "use_when": (
+            "You hold a codetalker-v3-continue line and must verify your "
+            "memory against the transcript without loading full turns."
+        ),
+        "do_not_use_when": (
+            "You need the recent turns themselves — codetalk_recover returns "
+            "verification and turns together."
         ),
     },
     "codetalk_resolve_session": {
@@ -81,12 +134,15 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
 DECISION_TREE: list[dict[str, str]] = [
     {
         "situation": (
-            "ANY turn with missing/wiped context, or a user message with no visible "
-            "antecedent ('done', 'continue', 'ok')"
+            "ANY turn with missing/wiped context, an antecedent-less user "
+            "message ('done', 'continue', 'ok'), or a <since_your_last_turn>/"
+            "<failed_turn> marker in the turn"
         ),
         "action": (
-            "codetalk_recover(working_directory='<project root>') — ONE call returns the "
-            "latest session plus its most recent user turns; do this BEFORE responding"
+            "codetalk_recover(working_directory='<project root>', "
+            "claimed_token=<last codetalker-v3-continue line if any>) — ONE call "
+            "returns recent turns, memory verification, and a fresh token; "
+            "do this BEFORE responding"
         ),
     },
     {
