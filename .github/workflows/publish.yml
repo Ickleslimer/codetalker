@@ -1,6 +1,9 @@
 name: publish
 
-# Publishes codetalker-mcp to PyPI when a vX.Y.Z tag is pushed.
+# Publishes codetalker-mcp to PyPI when a vX.Y.Z tag is pushed (or manually
+# via workflow_dispatch), then cuts the matching GitHub release with notes
+# SOURCED LIVE from the PyPI JSON API — so the release page and the PyPI
+# project description stay paired by construction, not by hand-copying.
 #
 # Gate: the wheel must pass the stranger-install smoke (fresh venv,
 # non-editable install, handshake, empty-home probe) before anything uploads.
@@ -19,6 +22,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -27,9 +32,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Tag/version consistency guard
+      - name: Read version + tag/version consistency guard
+        id: version
         run: |
           VERSION=$(grep -oP '(?<=__version__ = ")[^"]+' src/codetalker/__init__.py)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "__version__=$VERSION ref=$GITHUB_REF"
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             TAG=${GITHUB_REF_NAME#v}
@@ -68,3 +75,77 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    # Runs only after a successful PyPI upload; creates the matching GitHub
+    # release with notes fetched live from the PyPI registry.
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release
+    steps:
+      - name: Wait for the new version to be live on PyPI, then fetch its description
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          # python3 over jq: guaranteed on the runner, no extra dependency
+          get_json_field() {
+            curl -sf https://pypi.org/pypi/codetalker-mcp/json \
+              | python3 -c "import json,sys; print(json.load(sys.stdin)['info']['$1'])"
+          }
+          for i in $(seq 1 12); do
+            LIVE=$(get_json_field version || true)
+            echo "attempt $i: PyPI serves version=${LIVE:-<none>} (want $VERSION)"
+            if [ "$LIVE" = "$VERSION" ]; then break; fi
+            if [ "$i" = "12" ]; then
+              echo "::error::PyPI still does not serve $VERSION after 2 minutes — not cutting a release with unpaired notes"
+              exit 1
+            fi
+            sleep 10
+          done
+          get_json_field description > pypi-description.md
+          wc -c pypi-description.md
+
+      - name: Assemble paired release notes
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          # Quoted heredoc ('PYEOF'): bash performs NO substitution, so plain
+          # backticks are safe inside the Python; VERSION arrives via env.
+          python3 - <<'PYEOF'
+          import os
+
+          version = os.environ["VERSION"]
+          header = (
+              "> **Release of the PyPI publication: [`codetalker-mcp "
+              + version
+              + "`](https://pypi.org/project/codetalker-mcp/)** —\n"
+              "> built and published by the [`publish.yml`]"
+              "(https://github.com/Ickleslimer/codetalker/blob/main/.github/workflows/publish.yml)\n"
+              "> workflow via PyPI trusted publishing, gated on the stranger-install smoke.\n"
+              ">\n"
+              "> These notes are the live PyPI project description, fetched from the registry\n"
+              "> at release time so this page and PyPI stay paired.\n"
+              "\n"
+              "---\n"
+              "\n"
+          )
+          desc = open("pypi-description.md", encoding="utf-8").read()
+          open("release-notes.md", "w", encoding="utf-8").write(header + desc)
+          PYEOF
+
+      - name: Create the GitHub release (skip if it already exists)
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${VERSION}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "release $TAG already exists — skipping"
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "v${VERSION} — codetalker-mcp on PyPI" \
+            --notes-file release-notes.md
