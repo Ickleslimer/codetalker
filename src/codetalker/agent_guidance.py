@@ -183,19 +183,24 @@ def _resolve_project_root() -> str | None:
 
 
 def _package_version() -> str:
-    """Dist name changed to codetalker-mcp for PyPI (codetalker is taken);
-    fall back through the legacy name and the package attribute."""
+    """Source __version__ is the single source of truth; dist metadata is
+    only a fallback. Editable installs don't refresh .dist-info on code
+    edits, so metadata can lag the running source (seen live: editable
+    dist claimed 0.3.1 while the source was 0.3.2 — the server then lied
+    about its own version)."""
+    try:
+        from codetalker import __version__
+
+        if __version__ and __version__ != "0.0.0":
+            return __version__
+    except Exception:
+        pass
     for dist_name in ("codetalker-mcp", "codetalker"):
         try:
             return version(dist_name)
         except PackageNotFoundError:
             continue
-    try:
-        from codetalker import __version__
-
-        return __version__
-    except Exception:
-        return "0.0.0"
+    return "0.0.0"
 
 
 def build_server_metadata() -> dict[str, Any]:
