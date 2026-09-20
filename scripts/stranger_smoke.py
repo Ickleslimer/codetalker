@@ -101,7 +101,9 @@ async def main() -> int:
     fb_instr = a_fb["instructions"]
     other_instr = a_other["instructions"]
     checks["freebuff client gets marker-gated mandate"] = (
-        "<failed_turn>" in fb_instr and "codetalker-v3-continue" in fb_instr
+        "<failed_turn>" in fb_instr
+        # v0.3.5: verification is server-side; the echo mandate must stay gone.
+        and "codetalker-v3-continue" not in fb_instr
     )
     checks["generic client gets short fallback"] = (
         len(other_instr) < len(fb_instr) and "<failed_turn>" not in other_instr

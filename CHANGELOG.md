@@ -1,12 +1,21 @@
 # Changelog
 
+## 0.3.7 — 2026-09-20
+
+- Supersedes 0.3.5 for real: that wheel was built by CI from the tagged
+  commit, which predated the feature commit — so the published artifact
+  lacked the issuance ledger entirely. The sync script now refuses to
+  release from a dirty tree (the tag must equal the released code).
+- The wheel smoke gate earned its keep twice en route: it blocked the 0.3.6
+  tag because the stranger-smoke still asserted the retired echo mandate —
+  which exposed and fixed the last stale assertion. (0.3.6 was tagged but
+  never published to PyPI.)
+
 ## 0.3.6 — 2026-09-20
 
-- Supersedes 0.3.5: that wheel was built by CI from the tagged commit, which
-  predated the feature commit — so the published artifact lacked the issuance
-  ledger entirely. The sync script now refuses to release from a dirty tree
-  (the tag must equal the released code); this is the first run under that
-  guard and ships the 0.3.5 feature set for real.
+- Tagged but never published: the wheel smoke gate failed on the smoke's own
+  stale assertion (it still required the retired echo mandate). Superseded by
+  0.3.7; no wheel exists for this version.
 
 ## 0.3.5 — 2026-09-20
 
