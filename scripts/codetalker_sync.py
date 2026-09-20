@@ -5,9 +5,13 @@ commit -> push branch FIRST, then tag -> poll PyPI) and refreshes every
 local installation tier that is not already automatic:
 
   editable (Freebuff)  .pth into the source tree -> zero-touch already;
-                       metadata staleness no longer matters since
                        agent_guidance._package_version() prefers source
-                       __version__ (fixed 2026-09-20). Verified, reported.
+                       __version__, so staleness cannot make the server
+                       lie — and the publish leg now REFRESHES the
+                       .dist-info after the bump (uv pip install -e,
+                       verified by read-back), so metadata never drifts
+                       from source in the first place (drift seen twice
+                       in the 0.3.2/0.3.3 audits).
   uvx (Cursor, Antigravity, Codex)  ephemeral envs are pinned in uv's
                        cache until uv re-resolves. We warm the shared
                        cache with the new wheel (uvx -U --refresh), delete
@@ -239,7 +243,7 @@ def publish_leg(dry: bool) -> None:
 
     if dry:
         print("  [dry] would rewrite __init__.py, commit, push branch, tag, push tag,")
-        print("  [dry] poll PyPI, refresh uvx cache/envs, refresh Freebuff registry,")
+        print("  [dry] poll PyPI, refresh editable metadata, uvx cache/envs, Freebuff registry,")
         print("  [dry] verify resolution")
         refresh_freebuff_registry(dry)
         return
@@ -249,6 +253,17 @@ def publish_leg(dry: bool) -> None:
         VERSION_RE.sub(lambda _: f'__version__ = "{new}"', SRC_INIT.read_text(encoding="utf-8")),
         encoding="utf-8",
     )
+
+    step("refreshing dev editable install metadata (uv pip install -e)")
+    run(["uv", "pip", "install", "-e", str(REPO), "--python", str(venv_python()), "-q"])
+    got = subprocess.run(
+        [str(venv_python()), "-c",
+         f"import importlib.metadata as m; print(m.version('{DIST}'))"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    if got != new:
+        die(f"editable metadata still reports {got!r} (wanted {new!r})")
+    print(f"  editable metadata now {got}")
 
     step("commit + push branch FIRST, then tag separately (2026-09-19 lesson)")
     run(GIT + ["add", "src/codetalker/__init__.py"], cwd=REPO)
