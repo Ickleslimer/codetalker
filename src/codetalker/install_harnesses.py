@@ -9,8 +9,11 @@ What it does:
   - Backs up every file it modifies to ``<path>.bak`` (overwriting only the
     backup, never accumulating backups).
   - Codex gets a TOML ``[mcp_servers.codetalker]`` block; the rest JSON.
-  - Freebuff cannot be patched reliably from the CLI (client-managed consent
-    sidecar); prints manual instructions instead, like the PS1.
+  - Freebuff's launch config lives in two twin files
+    (``~/.config/freebuff-desktop/mcp.json`` + ``mcp_config.json``), which
+    ``--mode freebuff`` writes directly: missing twins are created, existing
+    ones merged in place. The app-managed consent sidecar stays manual:
+    after a restart, approve the codetalker manifest in the UI.
 
 Never touch harness configs without --dry-run first; the default is a dry
 run that prints exactly what would change.
@@ -78,8 +81,10 @@ def default_command(mode: str, project_root: Path, uv: str | None = None) -> tup
       uvx   — published package, ephemeral env: uvx --from codetalker-mcp codetalker
       tool  — bare shim from `uv tool install codetalker-mcp`: codetalker
       local — dev checkout: uv run --project <root> codetalker
+      freebuff — same command as uvx (published form), routed at Freebuff's
+                 config twins (created when missing)
     """
-    if mode == "uvx":
+    if mode in ("uvx", "freebuff"):
         return default_uvx(), ["--from", "codetalker-mcp", "codetalker"]
     if mode == "tool":
         return "codetalker", []
@@ -108,7 +113,15 @@ def config_targets() -> dict[str, Path]:
         targets["Antigravity (config)"] = antigravity_alt
     targets["Claude"] = claude
     targets["Codex"] = codex
+    # Freebuff reads a pair of identical config files at startup; both are
+    # kept in lockstep by the installer.
+    freebuff_base = home / ".config" / "freebuff-desktop"
+    targets["Freebuff (config)"] = freebuff_base / "mcp.json"
+    targets["Freebuff (config twin)"] = freebuff_base / "mcp_config.json"
     return targets
+
+
+FREEBUFF_COMMENT_KEY = "_codetalker_comment"
 
 
 def backup(path: Path) -> Path | None:
@@ -187,6 +200,64 @@ def update_codex_toml(path: Path, command: str, args: list[str], dry_run: bool) 
     return f"[ok] {past} [mcp_servers.codetalker] in {path}"
 
 
+def ensure_freebuff_config(path: Path, command: str, args: list[str], dry_run: bool) -> str:
+    """Create or merge one Freebuff launch config file.
+
+    Unlike the other JSON targets, a MISSING Freebuff config is CREATED
+    (that is the point of --mode freebuff: a fresh machine needs zero
+    hand-editing); the written file carries a comment key explaining the
+    consent-sidecar step. Existing files are merged like every other
+    target: other servers preserved, BOM tolerated, CRLF style kept,
+    corrupt files skipped, never overwritten.
+    """
+    if not path.exists():
+        if dry_run:
+            return f"[dry-run] would create {path}"
+        config = {
+            FREEBUFF_COMMENT_KEY: (
+                "Launch config for the Freebuff desktop app. The codetalker entry "
+                "is maintained by 'codetalker-install --mode freebuff' (published "
+                "uvx form; edit by hand for a dev checkout). After changing it, "
+                "restart Freebuff and approve the codetalker manifest in the UI — "
+                "the consent sidecar (~/.freebuff/mcp.json) is app-managed."
+            ),
+            "mcpServers": {"codetalker": {"command": command, "args": args}},
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        eol = "\r\n" if sys.platform == "win32" else "\n"
+        path.write_text(json.dumps(config, indent=2) + eol, encoding="utf-8")
+        return f"[ok] created {path}"
+
+    try:
+        # newline="" disables universal-newline translation: read_text would
+        # silently turn CRLF into LF, making the CRLF style undetectable
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            raw = f.read()
+        config = json.loads(raw)
+    except (json.JSONDecodeError, OSError) as e:
+        return f"[skip] {path}: unreadable ({e})"
+    if not isinstance(config, dict):
+        return f"[skip] {path}: unexpected top-level type {type(config).__name__}"
+
+    servers = config.get("mcpServers")
+    if not isinstance(servers, dict):
+        servers = {}
+        config["mcpServers"] = servers
+
+    servers["codetalker"] = {"command": command, "args": args}
+
+    if dry_run:
+        return f"[dry-run] would update {path}"
+
+    backup(path)
+    eol = "\r\n" if "\r\n" in raw else "\n"
+    out = json.dumps(config, indent=2) + "\n"
+    if eol == "\r\n":
+        out = out.replace("\n", "\r\n")
+    path.write_text(out, encoding="utf-8")
+    return f"[ok] updated {path}"
+
+
 def install(
     project_root: Path | None = None,
     mode: str = "local",
@@ -217,13 +288,16 @@ def install(
     for name, path in targets.items():
         if name.startswith("Codex"):
             results.append(f"  {name:<22} {update_codex_toml(path, command, args, dry_run)}")
+        elif name.startswith("Freebuff"):
+            results.append(f"  {name:<22} {ensure_freebuff_config(path, command, args, dry_run)}")
         else:
             results.append(f"  {name:<22} {merge_json_config(path, command, args, dry_run)}")
 
     freebuff_hint = (
-        "  Freebuff (manual)      client-managed consent sidecar; remove and\n"
-        "                         re-add codetalker in the Freebuff UI, then\n"
-        "                         verify with codetalk_capabilities.\n"
+        "  Freebuff (sidecar)     launch configs written above; the consent\n"
+        "                         sidecar is client-managed: restart Freebuff,\n"
+        "                         approve the codetalker manifest in the UI,\n"
+        "                         then verify with codetalk_capabilities.\n"
         "  NOTE: the PowerShell variant (scripts/install-harnesses.ps1) adds\n"
         "        a uv-tool-install option on Windows; results are identical."
     )
@@ -244,11 +318,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--mode",
-        choices=("uvx", "tool", "local"),
+        choices=("uvx", "tool", "local", "freebuff"),
         default=None,
         help="launch mode: uvx = published package (uvx --from codetalker-mcp), "
              "tool = bare shim after 'uv tool install codetalker-mcp', "
-             "local = dev checkout (default: local, or tool if --uv-tool)",
+             "local = dev checkout, freebuff = published form written into "
+             "Freebuff's config twins, creating them if missing "
+             "(default: local, or tool if --uv-tool)",
     )
     parser.add_argument(
         "--uv-tool", action="store_true",

@@ -335,3 +335,134 @@ def test_main_write_applies(fake_home, known_uv, capsys):
     assert rc == 0
     data = json.loads(cfg.read_text(encoding="utf-8"))
     assert "codetalker" in data["mcpServers"]
+
+
+# ---------------------------------------------------------------------------
+# Freebuff config twins (--mode freebuff)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def known_uvx(tmp_path, monkeypatch):
+    """Pin uvx resolution so the freebuff mode's command is deterministic."""
+    uvx = tmp_path / "uvx-bin"
+    uvx.write_text("", encoding="utf-8")
+    monkeypatch.setattr(ih, "default_uvx", lambda: str(uvx))
+    return uvx
+
+
+def _freebuff_paths(home: Path) -> tuple[Path, Path]:
+    base = home / ".config" / "freebuff-desktop"
+    return base / "mcp.json", base / "mcp_config.json"
+
+
+def test_freebuff_targets_in_config_targets(fake_home):
+    main, twin = _freebuff_paths(fake_home)
+    targets = ih.config_targets()
+    assert targets["Freebuff (config)"] == main
+    assert targets["Freebuff (config twin)"] == twin
+
+
+def test_freebuff_mode_creates_missing_twins(fake_home, known_uvx):
+    main, twin = _freebuff_paths(fake_home)
+    assert not main.exists() and not twin.exists()
+
+    ih.install(project_root=fake_home / "repo", mode="freebuff", dry_run=False)
+
+    data = json.loads(main.read_text(encoding="utf-8"))
+    assert data == json.loads(twin.read_text(encoding="utf-8"))
+    entry = data["mcpServers"]["codetalker"]
+    assert entry["command"] == str(known_uvx)
+    assert entry["args"] == ["--from", "codetalker-mcp", "codetalker"]
+    assert ih.FREEBUFF_COMMENT_KEY in data
+
+
+def test_freebuff_mode_dry_run_creates_nothing(fake_home):
+    main, twin = _freebuff_paths(fake_home)
+    results = ih.install(project_root=fake_home / "repo", mode="freebuff", dry_run=True)
+    assert not main.exists() and not twin.exists()
+    assert any("[dry-run] would create" in r for r in results)
+
+
+def test_freebuff_mode_merges_existing_preserving_others(fake_home, known_uvx):
+    main, twin = _freebuff_paths(fake_home)
+    for p in (main, twin):
+        write_json(p, {"mcpServers": {"desktop-control": {"command": "dc.exe", "args": []}}})
+
+    ih.install(project_root=fake_home / "repo", mode="freebuff", dry_run=False)
+
+    for p in (main, twin):
+        data = json.loads(p.read_text(encoding="utf-8"))
+        assert data["mcpServers"]["desktop-control"] == {"command": "dc.exe", "args": []}
+        assert data["mcpServers"]["codetalker"]["command"] == str(known_uvx)
+
+
+def test_freebuff_mode_replaces_dev_checkout_form(fake_home, known_uvx):
+    main, twin = _freebuff_paths(fake_home)
+    old = {"mcpServers": {"codetalker": {
+        "command": "D:\\codetalker\\.venv\\Scripts\\codetalker.exe", "args": []}}}
+    write_json(main, old)
+    write_json(twin, old)
+
+    ih.install(project_root=fake_home / "repo", mode="freebuff", dry_run=False)
+
+    for p in (main, twin):
+        entry = json.loads(p.read_text(encoding="utf-8"))["mcpServers"]["codetalker"]
+        assert entry["command"] == str(known_uvx)
+        assert "--from" in entry["args"]
+
+
+def test_freebuff_mode_preserves_crlf(fake_home):
+    main, twin = _freebuff_paths(fake_home)
+    main.parent.mkdir(parents=True, exist_ok=True)
+    crlf = '{\r\n  "mcpServers": {}\r\n}\r\n'
+    main.write_text(crlf, encoding="utf-8")
+    twin.write_text(crlf, encoding="utf-8")
+
+    ih.install(project_root=fake_home / "repo", mode="freebuff", dry_run=False)
+
+    raw = main.read_bytes()
+    assert b"\r\n" in raw
+    assert raw.count(b"\n") == raw.count(b"\r\n")
+
+
+def test_freebuff_mode_skips_corrupt(fake_home):
+    main, twin = _freebuff_paths(fake_home)
+    main.parent.mkdir(parents=True, exist_ok=True)
+    main.write_text("{not json", encoding="utf-8")
+    twin.write_text("{not json", encoding="utf-8")
+
+    results = ih.install(project_root=fake_home / "repo", mode="freebuff", dry_run=False)
+
+    assert any("[skip]" in r and "unreadable" in r for r in results)
+    assert main.read_text(encoding="utf-8") == "{not json"
+
+
+def test_freebuff_mode_backs_up_existing(fake_home):
+    main, twin = _freebuff_paths(fake_home)
+    write_json(main, {"mcpServers": {}})
+    write_json(twin, {"mcpServers": {}})
+
+    ih.install(project_root=fake_home / "repo", mode="freebuff", dry_run=False)
+
+    for p in (main, twin):
+        bak = p.with_name(p.name + ".bak")
+        assert bak.exists()
+        assert json.loads(bak.read_text(encoding="utf-8")) == {"mcpServers": {}}
+
+
+def test_freebuff_harness_filter(fake_home, known_uvx):
+    results = ih.install(
+        project_root=fake_home / "repo", mode="freebuff",
+        harnesses=["Freebuff"], dry_run=True)
+    assert any("Freebuff (config)" in r for r in results)
+    assert not any("Cursor" in r for r in results)
+
+
+def test_main_freebuff_mode_write(fake_home, known_uvx, capsys):
+    main, _ = _freebuff_paths(fake_home)
+    rc = ih.main(["--mode", "freebuff", "--write", "--harness", "Freebuff"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "DRY RUN" not in out
+    data = json.loads(main.read_text(encoding="utf-8"))
+    assert data["mcpServers"]["codetalker"]["command"] == str(known_uvx)
