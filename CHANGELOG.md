@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.6 — 2026-09-20
+
+- Supersedes 0.3.5: that wheel was built by CI from the tagged commit, which
+  predated the feature commit — so the published artifact lacked the issuance
+  ledger entirely. The sync script now refuses to release from a dirty tree
+  (the tag must equal the released code); this is the first run under that
+  guard and ships the 0.3.5 feature set for real.
+
 ## 0.3.5 — 2026-09-20
 
 - Change: continue-token verification is now **server-side** via an issuance
