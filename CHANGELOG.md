@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.5 — 2026-09-20
+
+- Change: continue-token verification is now **server-side** via an issuance
+  ledger (`~/.codetalker/tokens.jsonl`, `CODETALKER_TOKEN_LEDGER` to override).
+  Every anchor `codetalk_recover` emits is recorded at issuance;
+  `codetalk_recover_token` verifies against the ledger without loading turns
+  (transcript fallback preserved for pre-0.3.5 tokens; a signature-valid token
+  matching no ledger and no transcript is refused).
+- Change: agents are **no longer asked to append the `codetalker-v3-continue`
+  line to their replies** — the visible per-turn echo is retired along with its
+  ritual-drift failure mode; the token stays an internal, private artifact.
+  Tool descriptions, server instructions, notes, and the decision tree updated;
+  verification is strictly stronger (hand-crafted payloads are now refused).
+
 ## 0.3.4 — 2026-09-20
 
 - Fix: the sync script's publish leg now refreshes the dev editable install's
