@@ -96,8 +96,7 @@ HARNESS_NOTES: dict[str, str] = {
         "Freebuff drops in-flight context between turns mid-thread — on restarts "
         "(visible <since_your_last_turn>/<failed_turn> markers) and silently at "
         "message boundaries. Recovery is trigger-gated (v0.3): call "
-        "codetalk_recover on a marker or an antecedent-less message only; end "
-        "substantive turns with the codetalker-v3-continue line it returns. "
+        "codetalk_recover on a marker or an antecedent-less message only. "
         "MCP requires Freebuff consent sidecar approval after config changes."
     ),
     "opencode": (
@@ -580,10 +579,11 @@ def codetalk_capabilities() -> str:
         "continuity_v3": (
             "Recovery is trigger-gated: call codetalk_recover only on a wipe "
             "marker (<since_your_last_turn>, <failed_turn>) or an antecedent-less "
-            "user message — never on healthy turns. End every substantive turn "
-            "line codetalk_recover returns privately — never in visible chat — "
-            "as claimed_token; the server verifies it against its issuance "
-            "ledger (codetalk_recover_token = verification only)."
+            "user message — never on healthy turns. If codetalk_recover hands "
+            "you a token line, hold it privately and pass it back as "
+            "claimed_token if verification is ever needed; the server verifies "
+            "it against its issuance ledger (codetalk_recover_token = "
+            "verification only). Nothing ever goes in visible chat."
         ),
         "one_call_recovery": (
             "codetalk_recover(working_directory=...) = resolve + read recent turns "
