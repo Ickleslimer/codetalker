@@ -14,9 +14,17 @@ local installation tier that is not already automatic:
                        only env dirs whose pyvenv.cfg mentions the dist,
                        and prove the normal launch path now resolves the
                        new version by executing it.
+  freebuff registry     ~/.agents/mcp.json (the launch registry Freebuff
+                       actually reads — orchestrator-verified) is re-merged
+                       via the installer's freebuff mode: the codetalker
+                       entry is kept on the canonical published form,
+                       other servers preserved, file created if missing.
+                       Takes effect on the next Freebuff restart; the
+                       consent sidecar stays UI-managed.
 
-Local-only mode (--no-publish): dev sanity + uvx cache prep + matrix
-report, with no commit, no push, no PyPI dependency. Note that in this
+Local-only mode (--no-publish): dev sanity + Freebuff registry refresh
++ uvx cache prep + matrix report, with no commit, no push, no PyPI
+dependency (the registry refresh itself is offline-safe). Note that in this
 mode the uvx leg pulls the latest PUBLISHED release, not the working tree.
 
 Requires: git, gh (authenticated), uv/uvx on PATH. The publish leg needs
@@ -43,6 +51,13 @@ PYPI_JSON = f"https://pypi.org/pypi/{DIST}/json"
 VERSION_RE = re.compile(r"^__version__\s*=\s*[\"'](.+?)[\"']", re.M)
 
 GIT = ["git", "-c", "safe.directory=" + str(REPO).replace("\\", "/")]
+
+# The sync script may run under any interpreter; make the repo's src tree
+# importable so the installer is always reachable (it is stdlib-only).
+sys.path.insert(0, str(REPO / "src"))
+
+from codetalker.install_harnesses import install as install_harness_configs  # noqa: E402
+from codetalker.install_harnesses import config_targets  # noqa: E402
 
 
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -134,10 +149,22 @@ def refresh_uvx(new_version: str, old_version: str) -> None:
             f"CDN lag or cache issue — rerun in a minute")
 
 
+def refresh_freebuff_registry(dry: bool) -> None:
+    """Re-apply the installer's freebuff mode so ~/.agents/mcp.json — the
+    launch registry Freebuff actually reads — keeps its codetalker entry on
+    the canonical published form (created if missing; other servers such as
+    desktop-control preserved). Takes effect on the next Freebuff restart;
+    the consent sidecar stays UI-managed."""
+    step("freebuff tier: refresh registry entry (installer --mode freebuff)")
+    for line in install_harness_configs(
+        project_root=REPO, mode="freebuff", harnesses=["Freebuff"], dry_run=dry
+    ):
+        print("  " + line)
+
+
 def install_matrix() -> None:
     """Report every local install tier against the source version."""
     from codetalker import __version__
-    from codetalker.install_harnesses import config_targets
 
     step(f"install matrix (source __version__ = {__version__})")
     for name, path in config_targets().items():
@@ -157,7 +184,7 @@ def install_matrix() -> None:
             except ValueError:
                 wired = False
         print(f"  {name:22s} {'uvx -> ' + DIST if wired else 'NOT on the published package'}  ({path})")
-    print(f"  {'Freebuff (dev)':22s} editable, zero-touch; restart re-reads source  ({REPO})")
+    print(f"  {'Freebuff (dev-edit)':22s} editable, zero-touch; restart re-reads source  ({REPO})")
 
 
 def bump_patch_version() -> tuple[str, str]:
@@ -179,7 +206,9 @@ def publish_leg(dry: bool) -> None:
 
     if dry:
         print("  [dry] would rewrite __init__.py, commit, push branch, tag, push tag,")
-        print("  [dry] poll PyPI, refresh uvx cache/envs, verify resolution")
+        print("  [dry] poll PyPI, refresh uvx cache/envs, refresh Freebuff registry,")
+        print("  [dry] verify resolution")
+        refresh_freebuff_registry(dry)
         return
 
     step("bumping src/codetalker/__init__.py")
@@ -209,11 +238,16 @@ def publish_leg(dry: bool) -> None:
         time.sleep(10)
 
     refresh_uvx(new, old)
+    refresh_freebuff_registry(dry)
 
 
 def local_leg(dry: bool) -> None:
     step("dev tier: editable install already maps to the source tree (zero-touch)")
     print(f"  source of truth: {SRC_INIT}")
+
+    # Offline-safe, so it runs before any network-dependent step (and before
+    # the dry-run return — the installer prints its own [dry-run] lines).
+    refresh_freebuff_registry(dry)
 
     if dry:
         print("  [dry] would run: uvx -U --refresh --from", DIST, "codetalker --help")
