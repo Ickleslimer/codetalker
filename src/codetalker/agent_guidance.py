@@ -24,14 +24,11 @@ SERVER_INSTRUCTIONS: str = (
     "(2) the user's message has no visible antecedent ('done', 'continue', 'ok', "
     "or a reply to something you cannot see); (3) you find yourself about to "
     "ask the user to re-explain. On a trigger: do NOT reconstruct from files — "
-    "call codetalk_recover with the project root, and pass your claimed_token "
-    "(the codetalker-v3-continue line from your last finished turn) so the tool "
-    "can verify your memory against the transcript. If you have no token, say "
-    "so — do not invent one. State one line of what you recovered and from "
-    "when, then act. If codetalker fails or returns nothing, say so and fall "
-    "back to the project's durable records. When finishing ANY substantive "
-    "turn, end with the codetalker-v3-continue line codetalk_recover gave you "
-    "— it is the anchor the next wiped turn verifies against."
+    "call codetalk_recover with the project root, state one line of what you "
+    "recovered and from when, then act. Memory verification happens server-side "
+    "against an issuance ledger; never append tokens or anchors to your visible "
+    "replies, and never invent one. If codetalker fails or returns nothing, say "
+    "so and fall back to the project's durable records."
 )
 
 # Fallback for harnesses with no known mid-thread loss behavior: short, so the
@@ -40,9 +37,8 @@ SERVER_INSTRUCTIONS_FALLBACK: str = (
     "codetalker gives cross-harness transcript access. If a user message has no "
     "visible antecedent ('done', 'continue', 'ok') and context is missing, one "
     "codetalk_recover call with the project root recovers the latest session — "
-    "do not ask the user to re-explain. Optionally end substantive turns with "
-    "the codetalker-v3-continue line it returns, so any later wipe is "
-    "verifiable rather than guessed at."
+    "do not ask the user to re-explain. Verification is server-side: never "
+    "append returned tokens to visible chat."
 )
 
 # Kept for backward compatibility with tests/tools that expect the strict
@@ -139,8 +135,7 @@ DECISION_TREE: list[dict[str, str]] = [
             "<failed_turn> marker in the turn"
         ),
         "action": (
-            "codetalk_recover(working_directory='<project root>', "
-            "claimed_token=<last codetalker-v3-continue line if any>) — ONE call "
+            "codetalk_recover(working_directory='<project root>') — ONE call "
             "returns recent turns, memory verification, and a fresh token; "
             "do this BEFORE responding"
         ),

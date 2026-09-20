@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from codetalker.continuity import (
     parse_continue_token,
     verify_continue_token,
 )
+from codetalker import continuity as _continuity
 from codetalker.registry import registry
 from codetalker.schema import ActorRole, BlockType, NormalizedSession, NormalizedStep
 from codetalker.search import SearchOptions, normalize_queries, search_sessions
@@ -131,7 +133,7 @@ CONTEXT_RECOVERY_PLAYBOOK: dict[str, Any] = {
         "codetalk_recover is the one-call form of resolve + read — prefer it when context is missing mid-thread.",
         "Prefer since_last_user_input=true when the user just said 'continue'.",
         "Recovery is trigger-gated (v0.3): markers or antecedent-less messages trigger; healthy turns do nothing.",
-        "Pass the last codetalker-v3-continue line as claimed_token to have memory verified, not guessed.",
+        "Memory is verified server-side against the issuance ledger — no token echo is required (v0.3.5).",
     ],
     "decision_tree": DECISION_TREE,
 }
@@ -579,10 +581,9 @@ def codetalk_capabilities() -> str:
             "Recovery is trigger-gated: call codetalk_recover only on a wipe "
             "marker (<since_your_last_turn>, <failed_turn>) or an antecedent-less "
             "user message — never on healthy turns. End every substantive turn "
-            "with the codetalker-v3-continue line codetalk_recover returns; a "
-            "later wiped turn passes it back as claimed_token to have memory "
-            "verified against the transcript (codetalk_recover_token = "
-            "verification only)."
+            "line codetalk_recover returns privately — never in visible chat — "
+            "as claimed_token; the server verifies it against its issuance "
+            "ledger (codetalk_recover_token = verification only)."
         ),
         "one_call_recovery": (
             "codetalk_recover(working_directory=...) = resolve + read recent turns "
@@ -733,10 +734,10 @@ def _iso_timestamp(ts: Any) -> Any:
         "a working_directory and returns its most recent user turns plus the last "
         "assistant turn in a single step. Trigger-gated: a wipe marker "
         "(<since_your_last_turn>, <failed_turn>) or an antecedent-less message "
-        "is the trigger — healthy turns need no call. Pass claimed_token (your "
-        "last codetalker-v3-continue line) to have your memory verified against "
-        "the transcript. The response includes a fresh token line: end your "
-        "turn with it."
+        "is the trigger — healthy turns need no call. Optionally pass claimed_token "
+        "(a codetalker-v3-continue line you were given earlier) to have your memory "
+        "verified against the server's issuance ledger. Nothing needs to be "
+        "appended to your replies."
     ),
 )
 def codetalk_recover(
@@ -860,7 +861,8 @@ def codetalk_recover(
             "deeper history: codetalk_read(session_id=<session.session_id>, "
             "offset=...) or codetalk_search(search_scope='full'). If these turns "
             "do not explain the user's message, page further back BEFORE acting. "
-            "END YOUR TURN with the continue_token line above, appended verbatim."
+            "If your memory of these turns matches what you recovered, act on it; "
+            "no token needs to be echoed anywhere."
         ),
     }
     payload.update(_payload_meta(payload))
@@ -870,11 +872,12 @@ def codetalk_recover(
 @server.tool(
     name="codetalk_recover_token",
     description=(
-        "Verify a codetalker-v3-continue anchor against the transcript on disk "
-        "without loading full turns. Pass the token line from your last finished "
-        "turn plus the project working_directory. Use when you need to confirm "
-        "your memory is real before acting on it; codetalk_recover is the "
-        "fuller form (recent turns plus a fresh token)."
+        "Verify a codetalker-v3-continue anchor against the server's issuance "
+        "ledger (with a transcript fallback for pre-0.3.5 tokens) without "
+        "loading full turns. Pass the token line you were given plus the project "
+        "working_directory. Use when you need to confirm your memory is real "
+        "before acting on it; codetalk_recover is the fuller form (recent turns "
+        "plus a fresh token)."
     ),
 )
 def codetalk_recover_token(
@@ -897,7 +900,15 @@ def codetalk_recover_token(
             matches=False,
             reason="token absent, malformed, or signature-invalid",
         )
+        issued_here = False
     else:
+        issued_here = _continuity.record_issued_anchor(claimed_token)
+        if not issued_here:
+            logger.warning(
+                "token issuance ledger write failed at %s; falling back to "
+                "transcript-only verification",
+                _continuity.TOKEN_LEDGER_PATH,
+            )
         steps, pagination = adapter.load_steps_paginated(
             session=session,
             since=None,
@@ -916,6 +927,7 @@ def codetalk_recover_token(
             steps,
             session_id=session.session_id,
             total_steps=pagination.total_steps_available,
+            ledger_path=None if issued_here else os.devnull,
         )
     return json.dumps(
         {

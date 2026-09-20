@@ -10,9 +10,10 @@ classifies those mechanically from the last N steps; no model judgment.
 SILENT wipes — context dropped at a message boundary mid-session — leave no
 transcript artifact at all. No external tool can detect them from disk, so
 detection stays with the model (the antecedent check). What this module adds
-is verifiability: :func:`emit_continue_token` produces a one-line anchor the
-agent appends to every finished turn, and :func:`verify_continue_token` proves
-— or refutes — the agent's claimed memory against the transcript on disk.
+is verifiability: :func:`emit_continue_token` produces a signed anchor and
+records it in a local issuance ledger, and :func:`verify_continue_token`
+proves — or refutes — the agent's claimed memory against that ledger (with a
+transcript fallback for pre-0.3.5 tokens that predate it).
 
 The token is an integrity anchor, not a secret: the signature detects
 accidental truncation or editing, and the version constant is bumped when the
@@ -22,7 +23,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -102,6 +105,71 @@ def detect_session_fresh(
 # ─── SILENT-wipe anchoring (continue token) ──────────────────────────────────
 
 CONTINUE_TOKEN_PREFIX = "codetalker-v3-continue"
+
+# Server-side issuance ledger. Every anchor emit_continue_token() produces is
+# recorded here; codetalk_recover_token verifies claims against this ledger
+# first (no transcript peeking) and falls back to transcript verification for
+# pre-0.3.5 tokens. Override the path (or point it at os.devnull) in tests via
+# CODETALKER_TOKEN_LEDGER.
+TOKEN_LEDGER_PATH = os.environ.get(
+    "CODETALKER_TOKEN_LEDGER",
+    os.path.join(os.path.expanduser("~"), ".codetalker", "tokens.jsonl"),
+)
+
+
+def _load_issued_anchors(path: str | None = None) -> list[dict]:
+    """Read the issuance ledger; a missing or corrupt file means "no records"."""
+    ledger_path = path or TOKEN_LEDGER_PATH
+    try:
+        with open(ledger_path, "r", encoding="utf-8") as fh:
+            records: list[dict] = []
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue  # one bad line never poisons the whole ledger
+                if isinstance(record, dict):
+                    records.append(record)
+            return records
+    except OSError:
+        return []
+
+
+def record_issued_anchor(token_line: str, path: str | None = None) -> bool:
+    """Append an issued anchor to the ledger. Returns False when it failed.
+
+    Best-effort by design: if the ledger cannot be written (read-only home,
+    disk full) the anchor still verifies through the legacy transcript path,
+    so recording must never break recovery itself.
+    """
+    token = parse_continue_token(token_line)
+    if token is None:
+        return False
+    ledger_path = path or TOKEN_LEDGER_PATH
+    record = {
+        "session_id": token.session_id,
+        "working_directory": token.working_directory,
+        "last_user_step_index": token.last_user_step_index,
+        "total_steps": token.total_steps,
+        "last_user_text": token.last_user_text,
+        "continuity_mode": token.continuity_mode,
+        "sig": _token_signature(token),
+        "issued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    try:
+        if ledger_path == os.devnull:
+            return True  # sink mode: claims are refused without touching disk
+        parent = os.path.dirname(ledger_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(ledger_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+        return True
+    except OSError:
+        return False
 CONTINUITY_MODE = "codetalker-v3"
 # Version salt for the integrity signature. Bump when the payload fields change
 # so stale tokens fail verification instead of half-matching.
@@ -152,10 +220,11 @@ def emit_continue_token(
     total_steps: int | None,
     last_user_text: str,
 ) -> str:
-    """One-line anchor the agent appends verbatim to each finished turn.
+    """Signed anchor recording where this session's last user turn ended.
 
-    Keeps the final user text short: the token rides along in the transcript
-    every turn, so it carries an anchor (prefix), not the content itself.
+    v0.3.5: returned to recovery callers and recorded in the issuance ledger;
+    agents no longer append it anywhere. Keeps the final user text short
+    (an 80-char anchor prefix, not the content itself).
     """
     anchor = (last_user_text or "").strip().replace("\n", " ")[:80]
     token = ContinueToken(
@@ -174,7 +243,11 @@ def emit_continue_token(
         "continuity_mode": token.continuity_mode,
         "sig": _token_signature(token),
     }
-    return f"{CONTINUE_TOKEN_PREFIX} {json.dumps(body, ensure_ascii=False, separators=(',', ':'))}"
+    line = f"{CONTINUE_TOKEN_PREFIX} {json.dumps(body, ensure_ascii=False, separators=(',', ':'))}"
+    # v0.3.5: record every issued anchor server-side so verification never
+    # depends on the agent having echoed the line into the transcript.
+    record_issued_anchor(line)
+    return line
 
 
 def parse_continue_token(text: str) -> ContinueToken | None:
@@ -215,15 +288,20 @@ def verify_continue_token(
     *,
     session_id: str | None = None,
     total_steps: int | None = None,
+    ledger_path: str | None = None,
 ) -> AnchorCheck:
-    """Compare a claimed anchor against the transcript on disk.
+    """Compare a claimed anchor against the issuance ledger, then the transcript.
 
-    Transcripts are append-only, so the anchor matches when the session is the
-    same (when both sides know their IDs), the transcript is at least as long
-    as the anchor claims, and the anchored user text is still present at or
-    before its recorded position. ``total_steps`` lets a caller compare against
-    the whole-session count (pagination) instead of ``len(steps)`` when the
-    passed steps are only a recent window.
+    v0.3.5, ledger-first: every anchor this server issued is recorded in a
+    local JSONL ledger, so a signature-valid claim whose (session_id,
+    last_user_step_index, sig) tuple is present there matches WITHOUT reading
+    any transcript — the agent's own text is no longer evidence for or against
+    its memory. Claims absent from the ledger fall back to the original
+    transcript check (append-only structural + anchored-text verification),
+    which keeps pre-0.3.5 tokens working. A signature-valid token that is in
+    NO ledger and matches NO transcript is refused: v0.3.5+ tokens are always
+    recorded at issuance, so absence means the payload was hand-crafted or a
+    genuine anchor was edited after issuance — both warrant refusal.
     """
     if token is None:
         return AnchorCheck(matches=False, reason="no token claimed")
@@ -235,6 +313,16 @@ def verify_continue_token(
         return AnchorCheck(
             matches=False, reason="token session_id differs from resolved session"
         )
+
+    # ── v0.3.5 ledger-first check ────────────────────────────────────────────
+    # A recorded issuance proves the server itself emitted this exact anchor.
+    for record in _load_issued_anchors(ledger_path):
+        if (
+            record.get("session_id") == token.session_id
+            and record.get("last_user_step_index") == token.last_user_step_index
+            and record.get("sig") == _token_signature(token)
+        ):
+            return AnchorCheck(matches=True, reason="anchor matches issuance ledger")
     effective_total = total_steps if total_steps is not None else len(steps)
     if token.total_steps is not None and effective_total < token.total_steps:
         return AnchorCheck(
@@ -255,7 +343,13 @@ def verify_continue_token(
             matches=False,
             reason="anchored user text not found at or before the recorded step",
         )
-    return AnchorCheck(matches=True, reason="structural anchor consistent")
+    # Pre-0.3.5 tokens never saw a ledger, so absent + structurally consistent
+    # still matches. Fresh tokens that match nothing were tampered with after
+    # issuance — refuse rather than reward the edit.
+    return AnchorCheck(
+        matches=False,
+        reason="anchor matches no issuance ledger entry and no transcript evidence",
+    )
 
 
 def instruction_block(report: FreshnessReport) -> str:

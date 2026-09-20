@@ -135,8 +135,11 @@ def test_codetalk_recover_missing_session_raises():
 
 def test_server_instructions_are_trigger_gated():
     # v0.3: the mandate fires on triggers, not on every healthy turn.
+    # v0.3.5: verification is server-side — the mandate must NOT ask agents
+    # to append the token line to their replies.
     assert "codetalk_recover" in SERVER_INSTRUCTIONS
-    assert "codetalker-v3-continue" in SERVER_INSTRUCTIONS
+    assert "issuance ledger" in SERVER_INSTRUCTIONS
+    assert "codetalker-v3-continue" not in SERVER_INSTRUCTIONS
     assert server_module.server.instructions == SERVER_INSTRUCTIONS
 
 
@@ -146,6 +149,7 @@ def test_instructions_tailored_by_client():
     assert select_instructions("claude-desktop") is SERVER_INSTRUCTIONS_FALLBACK
     assert select_instructions(None) is SERVER_INSTRUCTIONS_FALLBACK
     assert "codetalk_recover" in SERVER_INSTRUCTIONS_FALLBACK
+    assert "never" in SERVER_INSTRUCTIONS_FALLBACK
 
 
 def test_codetalk_recover_token_tool_registered():

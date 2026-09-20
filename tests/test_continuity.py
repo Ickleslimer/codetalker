@@ -6,6 +6,7 @@ All transcript fixtures are synthetic NormalizedStep objects — no live data.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -14,9 +15,12 @@ from codetalker.agent_guidance import (
     SERVER_INSTRUCTIONS_FALLBACK,
     select_instructions,
 )
+from codetalker import continuity as continuity_module
 from codetalker.continuity import (
+    CONTINUE_TOKEN_PREFIX,
     RESTART_MARKERS,
     ContinueToken,
+    _token_signature,
     detect_session_fresh,
     emit_continue_token,
     extract_step_text,
@@ -29,6 +33,14 @@ from codetalker.schema import Actor, ActorRole, NormalizedStep, TextBlock
 
 def _step(idx: int, role: ActorRole, text: str) -> NormalizedStep:
     return NormalizedStep(step_index=idx, actor=Actor(role=role), blocks=[TextBlock(text=text)])
+
+
+@pytest.fixture(autouse=True)
+def _isolated_token_ledger(tmp_path, monkeypatch):
+    """Point the issuance ledger at tmp so tests never touch ~/.codetalker."""
+    monkeypatch.setattr(
+        continuity_module, "TOKEN_LEDGER_PATH", str(tmp_path / "tokens.jsonl")
+    )
 
 
 # ─── fresh-session detection ─────────────────────────────────────────────────
@@ -119,7 +131,10 @@ def test_extract_step_text_ignores_non_text_blocks():
 
 def test_freebuff_gets_full_mandate():
     assert select_instructions("freebuff") is SERVER_INSTRUCTIONS
-    assert "codetalker-v3-continue" in SERVER_INSTRUCTIONS
+    # v0.3.5: the visible echo mandate is gone; the prefix survives only as a
+    # payload marker, never as something the agent is told to output.
+    assert "codetalker-v3-continue" not in SERVER_INSTRUCTIONS
+    assert "never" in SERVER_INSTRUCTIONS
 
 
 def test_other_harnesses_get_fallback():
@@ -233,7 +248,10 @@ def test_verify_matching_anchor():
         last_user_text="the exact user instruction",
     )
     token = parse_continue_token(line)
-    check = verify_continue_token(token, _anchored_steps("the exact user instruction"))
+    # devnull ledger = legacy transcript-only verification (pre-0.3.5 path)
+    check = verify_continue_token(
+        token, _anchored_steps("the exact user instruction"), ledger_path=os.devnull
+    )
     assert check.matches is True
 
 
@@ -246,7 +264,9 @@ def test_verify_missing_anchor_text():
         last_user_text="text that exists only in a stale context window",
     )
     token = parse_continue_token(line)
-    check = verify_continue_token(token, _anchored_steps("different user text entirely"))
+    check = verify_continue_token(
+        token, _anchored_steps("different user text entirely"), ledger_path=os.devnull
+    )
     assert check.matches is False
     assert "not found" in check.reason
 
@@ -261,7 +281,7 @@ def test_verify_shrunk_transcript_fails():
     )
     token = parse_continue_token(line)
     check = verify_continue_token(
-        token, _anchored_steps("anchor words"), total_steps=6
+        token, _anchored_steps("anchor words"), total_steps=6, ledger_path=os.devnull
     )
     assert check.matches is False
     assert "6 steps" in check.reason
@@ -309,6 +329,7 @@ def test_verify_uses_total_steps_override():
         token,
         _anchored_steps("anchor words"),
         total_steps=30,
+        ledger_path=os.devnull,
     )
     assert check.matches is True
 
@@ -341,6 +362,125 @@ def test_token_json_body_is_compact_single_line():
     body = json.loads(line.split(" ", 1)[1])
     assert body["session_id"] == "s"
     assert "\n" not in line
+
+
+# ─── v0.3.5 issuance ledger ──────────────────────────────────────────────────
+
+
+def _anchor_line(session_id="sess-ledger", step=2, total=6, text="anchor words"):
+    return emit_continue_token(
+        session_id=session_id,
+        working_directory="w",
+        last_user_step_index=step,
+        total_steps=total,
+        last_user_text=text,
+    )
+
+
+def test_emit_records_anchor_in_ledger():
+    line = _anchor_line()
+    records = continuity_module._load_issued_anchors()
+    assert len(records) == 1
+    token = parse_continue_token(line)
+    assert records[0]["sig"] == _token_signature(token)
+    assert records[0]["session_id"] == "sess-ledger"
+    assert "issued_at" in records[0]
+
+
+def test_verify_ledger_hit_without_transcript():
+    line = _anchor_line()
+    token = parse_continue_token(line)
+    # No steps at all — the ledger alone proves the claim. This is the
+    # property that retires the echo: the agent's own text is no longer
+    # the evidence.
+    check = verify_continue_token(token, [], session_id="sess-ledger")
+    assert check.matches is True
+    assert "issuance ledger" in check.reason
+
+
+def test_verify_tampered_payload_never_parses():
+    # Forged payload reusing a real (session_id, step) pair with one altered
+    # field: the signature check must reject it before any ledger lookup.
+    line = _anchor_line()
+    body = json.loads(line.split(" ", 1)[1])
+    body["total_steps"] = 999
+    forged = f"{CONTINUE_TOKEN_PREFIX} {json.dumps(body, separators=(',', ':'))}"
+    assert parse_continue_token(forged) is None
+
+
+def test_verify_hand_crafted_fresh_token_refused_without_any_evidence():
+    # Signature-valid but never issued, matching no transcript: refused.
+    # v0.3.5+ tokens are always recorded at issuance, so absence means the
+    # payload was hand-crafted or a genuine anchor was edited after issuance.
+    token = ContinueToken(
+        session_id="sess-ghost",
+        working_directory="w",
+        last_user_text="ghost",
+    )
+    check = verify_continue_token(token, [], session_id="sess-ghost")
+    assert check.matches is False
+    assert "no issuance ledger entry" in check.reason
+
+
+def test_verify_pre_v035_token_falls_back_to_transcript():
+    # A legacy token (never recorded in a ledger) still verifies the old way.
+    token = ContinueToken(
+        session_id="sess-legacy",
+        working_directory="w",
+        last_user_step_index=2,
+        total_steps=6,
+        last_user_text="anchor words",
+    )
+    check = verify_continue_token(
+        token,
+        _anchored_steps("anchor words"),
+        session_id="sess-legacy",
+        ledger_path=os.devnull,
+    )
+    assert check.matches is True
+    assert "anchor found" in check.reason
+
+
+def test_record_issued_anchor_rejects_non_token():
+    assert continuity_module.record_issued_anchor("not a token") is False
+
+
+def test_record_issued_anchor_devnull_sink():
+    line = _anchor_line()
+    assert continuity_module.record_issued_anchor(line, path=os.devnull) is True
+    # devnull accepts the record without touching disk: the tmp ledger still
+    # holds exactly the ONE entry emit's auto-record wrote — no second one.
+    records = continuity_module._load_issued_anchors()
+    assert len(records) == 1
+    token = parse_continue_token(line)
+    check = verify_continue_token(
+        token, [], session_id="sess-ledger", ledger_path=os.devnull
+    )
+    assert check.matches is False
+
+
+def test_unwritable_ledger_degrades_to_transcript_verification(tmp_path):
+    # Recording fails (the path is a directory), but emit still returns the
+    # line and the claim still verifies through the transcript fallback —
+    # recovery availability must never depend on ledger writability.
+    bad_path = tmp_path / "occupied"
+    bad_path.mkdir()
+    line = emit_continue_token(
+        session_id="sess-bad",
+        working_directory="w",
+        last_user_step_index=2,
+        total_steps=6,
+        last_user_text="anchor words",
+    )
+    assert continuity_module.record_issued_anchor(line, path=str(bad_path)) is False
+    token = parse_continue_token(line)
+    check = verify_continue_token(
+        token,
+        _anchored_steps("anchor words"),
+        session_id="sess-bad",
+        ledger_path=str(bad_path),
+    )
+    assert check.matches is True
 
 
 if __name__ == "__main__":  # pragma: no cover
