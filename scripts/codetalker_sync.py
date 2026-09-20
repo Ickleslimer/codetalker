@@ -158,6 +158,47 @@ def find_stale_uvx_envs() -> list[Path]:
     return found
 
 
+def probe_uvx_resolution(refresh: bool = False, timeout: int = 300) -> str | None:
+    """Version a normal `uvx --from <dist> python -c ...` launch resolves.
+
+    Returns the reported version, or None on timeout/failure. With
+    refresh=True the resolution is forced to revalidate (used as the
+    unconditional gate: it must see the new wheel even while a plain-path
+    launch may legally still serve its cached index page).
+    """
+    cmd = ["uvx"]
+    if refresh:
+        cmd.append("--refresh")
+    cmd += ["--from", DIST, "python", "-c", "import codetalker; print(codetalker.__version__)"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
+    out = (r.stdout or "").strip().splitlines()
+    return out[-1].strip() if out and r.returncode == 0 else None
+
+
+def plain_path_eventually(new_version: str, attempts: int = 6, wait: int = 120) -> bool:
+    """Wait for the PLAIN launch path to serve the new version.
+
+    Plain uvx re-resolves only when its cached PyPI index page goes stale
+    (uv respects the index max-age, ~600s on PyPI). If a harness has a
+    codetalker server live from the cache, `uv cache clean` may block on
+    the shared lock — so waiting is the correct primary strategy and the
+    clean is best-effort only.
+    """
+    for i in range(attempts):
+        served = probe_uvx_resolution()
+        if served == new_version:
+            print(f"  OK — plain `uvx --from {DIST} codetalker` launches {served}")
+            return True
+        if i < attempts - 1:
+            print(f"  plain path serves {served!r} (index page still fresh); "
+                  f"retrying in {wait}s")
+            time.sleep(wait)
+    return False
+
+
 def refresh_uvx(new_version: str, old_version: str) -> None:
     """Warm the shared cache with the new wheel, drop pinned envs, prove it."""
     step("uvx tier: warm shared cache with the new wheel")
@@ -168,22 +209,31 @@ def refresh_uvx(new_version: str, old_version: str) -> None:
         print(f"  removing {env}")
         shutil.rmtree(env, ignore_errors=True)
 
-    # uv caches PyPI's simple-index page with its own max-age, which can
-    # outlive the JSON API's freshness — without this, re-resolution may
-    # still see the old version even though the registry has moved on.
-    step("uvx tier: drop the dist's cached index pages")
-    run(["uv", "cache", "clean", DIST])
+    # uv caches PyPI's simple-index page with its own max-age; drop it so
+    # the plain path re-resolves NOW instead of at TTL expiry. Best-effort:
+    # with a harness server live from this cache, the exclusive clean blocks
+    # on the shared lock — that is normal, and plain_path_eventually's
+    # bounded retries are the correct path to green in that case.
+    step("uvx tier: drop the dist's cached index pages (best-effort)")
+    try:
+        subprocess.run(["uv", "cache", "clean", DIST],
+                       capture_output=True, text=True, timeout=20)
+    except subprocess.TimeoutExpired:
+        print("  clean skipped: cache lock held (a live server is using it) — "
+              "plain-path retries will cover this")
 
-    step(f"uvx tier: prove the normal launch path resolves {new_version}")
-    probe = ["uvx", "--from", DIST, "python", "-c",
-             "import codetalker; print(codetalker.__version__)"]
-    r = subprocess.run(probe, capture_output=True, text=True, timeout=300)
-    served = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "<none>"
-    if r.returncode == 0 and served == new_version:
-        print(f"  OK — a fresh `uvx --from {DIST} codetalker` launches {served}")
-    else:
-        die(f"uvx still resolves {served!r} (wanted {new_version!r}); "
-            f"CDN lag or cache issue — rerun in a minute")
+    step(f"uvx tier: prove the forced-resolution gate resolves {new_version}")
+    forced = probe_uvx_resolution(refresh=True)
+    if forced != new_version:
+        die(f"forced refresh still resolves {forced!r} (wanted {new_version!r}) — "
+            f"real distribution problem; investigate before retrying")
+    print(f"  forced-resolution gate: {forced}")
+
+    step(f"uvx tier: wait for the plain launch path to resolve {new_version}")
+    if not plain_path_eventually(new_version):
+        die(f"plain uvx path still serves the old version after "
+            f"index-TTL retries — unexpected: forced resolution sees "
+            f"{new_version}. Check uv cache state manually.")
 
 
 def refresh_freebuff_registry(dry: bool) -> None:
@@ -311,7 +361,8 @@ def local_leg(dry: bool) -> None:
     if published == old:
         print(f"  PyPI already serves {published}; warming cache only")
         run(["uvx", "-U", "--refresh", "--from", DIST, "codetalker", "--help"], timeout=300)
-    else:
+        served = probe_uvx_resolution(refresh=True)
+        print(f"  forced-resolution probe: {served!r}")
         print(f"  PyPI serves {published} but source is {old}: the working tree is AHEAD. "
               f"Run without --no-publish to release it; refreshing cache to {published} anyway")
         run(["uvx", "-U", "--refresh", "--from", DIST, "codetalker", "--help"], timeout=300)
