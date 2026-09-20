@@ -56,6 +56,31 @@ VERSION_RE = re.compile(r"^__version__\s*=\s*[\"'](.+?)[\"']", re.M)
 
 GIT = ["git", "-c", "safe.directory=" + str(REPO).replace("\\", "/")]
 
+
+def require_clean_tree() -> None:
+    """Refuse to release unless the tree is clean before the bump.
+
+    v0.3.5's run released a tag whose checkout did not contain the very
+    feature being released (source edits were still uncommitted when the
+    script ran; the script commits only its own version bump, and CI builds
+    the wheel from the tag). The guard turns that silent failure class into
+    a loud refusal.
+    """
+    st = subprocess.run(
+        GIT + ["status", "--porcelain"], capture_output=True, text=True
+    )
+    if st.returncode != 0:
+        die(f"git status failed: {st.stderr.strip()}")
+    if st.stdout.strip():
+        die(
+            "working tree is dirty — commit everything first, then run the "
+            "release.\n  The tag is built and CI publishes from the TAGGED "
+            "COMMIT, not this working tree; an uncommitted feature would be "
+            "silently missing from the wheel.\n  "
+            + "\n  ".join(st.stdout.strip().splitlines())
+        )
+    print("  tree clean — tag will match the released code")
+
 # The sync script may run under any interpreter; make the repo's src tree
 # importable so the installer is always reachable (it is stdlib-only).
 sys.path.insert(0, str(REPO / "src"))
@@ -291,6 +316,8 @@ def publish_leg(dry: bool) -> None:
     old, new = bump_patch_version()
     print(f"[sync] release {old} -> {new}")
 
+    if not dry:
+        require_clean_tree()
     if dry:
         print("  [dry] would rewrite __init__.py, commit, push branch, tag, push tag,")
         print("  [dry] poll PyPI, refresh editable metadata, uvx cache/envs, Freebuff registry,")
