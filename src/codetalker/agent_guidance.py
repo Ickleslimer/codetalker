@@ -85,8 +85,9 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
     },
     "codetalk_recover_token": {
         "use_when": (
-            "You hold a codetalker-v3-continue line and must verify your "
-            "memory against the transcript without loading full turns."
+            "You hold a codetalker-v3-continue anchor line and must verify your "
+            "memory server-side (issuance ledger, transcript fallback) without "
+            "loading full turns."
         ),
         "do_not_use_when": (
             "You need the recent turns themselves — codetalk_recover returns "
