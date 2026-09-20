@@ -99,6 +99,14 @@ def uv_cache_dir() -> Path | None:
         return None
 
 
+def uv_tool_dir() -> Path | None:
+    try:
+        out = subprocess.run(["uv", "tool", "dir"], capture_output=True, text=True, check=True)
+        return Path(out.stdout.strip())
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
 def find_pinned_uvx_envs() -> list[Path]:
     """Ephemeral uvx env dirs whose pyvenv.cfg mentions the dist.
 
@@ -127,15 +135,40 @@ def find_pinned_uvx_envs() -> list[Path]:
     return found
 
 
+def find_stale_uvx_envs() -> list[Path]:
+    """Pinned cache envs + ORPHANED receipt-less tool envs for the dist.
+
+    Two stale sources found live during the first publish-leg run:
+    (1) cache environments pinned to the old wheel (environments-v2),
+    (2) a persisted tool environment under `uv tool dir` with NO
+    uv-receipt.toml — an orphan uvx reuses while ignoring newer versions
+    and refusing -U ("Tools cannot be upgraded via uvx"). Managed tool
+    installs carry a receipt and are respected; orphans are removed.
+    """
+    found = find_pinned_uvx_envs()
+    tools = uv_tool_dir()
+    if tools and tools.is_dir():
+        for env in tools.iterdir():
+            if env.is_dir() and env.name == DIST and not (env / "uv-receipt.toml").exists():
+                found.append(env)
+    return found
+
+
 def refresh_uvx(new_version: str, old_version: str) -> None:
     """Warm the shared cache with the new wheel, drop pinned envs, prove it."""
     step("uvx tier: warm shared cache with the new wheel")
     run(["uvx", "-U", "--refresh", "--from", DIST, "codetalker", "--help"], timeout=300)
 
-    step("uvx tier: remove envs pinned to the old wheel")
-    for env in find_pinned_uvx_envs():
+    step("uvx tier: remove envs pinned to the old wheel (cache + orphaned tool envs)")
+    for env in find_stale_uvx_envs():
         print(f"  removing {env}")
         shutil.rmtree(env, ignore_errors=True)
+
+    # uv caches PyPI's simple-index page with its own max-age, which can
+    # outlive the JSON API's freshness — without this, re-resolution may
+    # still see the old version even though the registry has moved on.
+    step("uvx tier: drop the dist's cached index pages")
+    run(["uv", "cache", "clean", DIST])
 
     step(f"uvx tier: prove the normal launch path resolves {new_version}")
     probe = ["uvx", "--from", DIST, "python", "-c",
@@ -267,7 +300,7 @@ def local_leg(dry: bool) -> None:
         print(f"  PyPI serves {published} but source is {old}: the working tree is AHEAD. "
               f"Run without --no-publish to release it; refreshing cache to {published} anyway")
         run(["uvx", "-U", "--refresh", "--from", DIST, "codetalker", "--help"], timeout=300)
-    for env in find_pinned_uvx_envs():
+    for env in find_stale_uvx_envs():
         print(f"  removing {env}")
         shutil.rmtree(env, ignore_errors=True)
 
