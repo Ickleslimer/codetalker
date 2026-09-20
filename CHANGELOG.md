@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.4 — 2026-09-20
+
+- Fix: the sync script's publish leg now refreshes the dev editable install's
+  dist metadata after the version bump, verified by read-back — the
+  metadata-behind-source drift seen in the 0.3.2/0.3.3 audits cannot recur.
+- Fix: the sync script's uvx launch-path proof removes orphaned receipt-less
+  tool environments (which pin resolution and refuse upgrades) and clears the
+  dist's cached PyPI index pages before verifying — both failure modes found
+  in the first live publish run.
+
 ## 0.3.3 — 2026-09-20
 
 - `codetalker-install --mode freebuff` now targets `~/.agents/mcp.json` — the
