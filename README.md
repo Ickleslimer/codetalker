@@ -225,8 +225,8 @@ codetalker-install --uv-tool --write
 ```
 
 Targets are the same as the PowerShell script (Cursor, Antigravity, Claude Desktop,
-Codex TOML) plus **Freebuff's config twins**
-(`~/.config/freebuff-desktop/mcp.json` + `mcp_config.json`), which are created
+Codex TOML) plus **Freebuff desktop's launch registry** (`~/.agents/mcp.json`,
+the path verified inside the Freebuff orchestrator bundle), which is created
 when missing and merged in place when present — so a fresh machine needs zero
 hand-editing. Existing `codetalker` entries are replaced in place, other MCP
 servers are preserved, every modified file gets a one-shot `.bak` backup, and
@@ -234,11 +234,12 @@ CRLF line endings survive on Windows-written configs. The Claude Desktop config
 resolves to `%APPDATA%\Claude\claude_desktop_config.json` on Windows and
 `~/.claude/claude_desktop_config.json` elsewhere.
 
-One step always stays manual: after writing Freebuff's launch configs (or on
-first run), **restart Freebuff and approve the codetalker manifest in the UI** —
-the consent sidecar (`~/.freebuff/mcp.json`) is client-managed and cannot be
-patched from the CLI. On Windows, either installer works; the PowerShell
-variant additionally offers `uv tool install` integration.
+One step always stays manual: after writing Freebuff's registry (or on first
+run), **restart Freebuff and approve the codetalker manifest in the UI** — the
+consent sidecar (`~/.freebuff/mcp.json`) is client-managed and its
+mutation endpoints are launch-token-gated by design. On Windows, either
+installer works; the PowerShell variant additionally offers `uv tool install`
+integration.
 
 ### Adding to MCP Configuration (manual)
 

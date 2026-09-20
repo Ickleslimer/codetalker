@@ -9,10 +9,11 @@ What it does:
   - Backs up every file it modifies to ``<path>.bak`` (overwriting only the
     backup, never accumulating backups).
   - Codex gets a TOML ``[mcp_servers.codetalker]`` block; the rest JSON.
-  - Freebuff's launch config lives in two twin files
-    (``~/.config/freebuff-desktop/mcp.json`` + ``mcp_config.json``), which
-    ``--mode freebuff`` writes directly: missing twins are created, existing
-    ones merged in place. The app-managed consent sidecar stays manual:
+  - Freebuff desktop reads its launch registry from ``~/.agents/mcp.json``
+    (verified in the orchestrator bundle: agentsConfigPath = ~/.agents/mcp.json;
+    the ~/.config/freebuff-desktop/ files are NOT read). ``--mode freebuff``
+    writes that file — created when missing, merged when present. The
+    app-managed consent sidecar (``~/.freebuff/mcp.json``) stays manual:
     after a restart, approve the codetalker manifest in the UI.
 
 Never touch harness configs without --dry-run first; the default is a dry
@@ -113,11 +114,9 @@ def config_targets() -> dict[str, Path]:
         targets["Antigravity (config)"] = antigravity_alt
     targets["Claude"] = claude
     targets["Codex"] = codex
-    # Freebuff reads a pair of identical config files at startup; both are
-    # kept in lockstep by the installer.
-    freebuff_base = home / ".config" / "freebuff-desktop"
-    targets["Freebuff (config)"] = freebuff_base / "mcp.json"
-    targets["Freebuff (config twin)"] = freebuff_base / "mcp_config.json"
+    # Freebuff desktop's launch registry (orchestrator-verified: it also
+    # merges these into every harness's view of "shared" MCP config).
+    targets["Freebuff"] = home / ".agents" / "mcp.json"
     return targets
 
 
@@ -201,14 +200,15 @@ def update_codex_toml(path: Path, command: str, args: list[str], dry_run: bool) 
 
 
 def ensure_freebuff_config(path: Path, command: str, args: list[str], dry_run: bool) -> str:
-    """Create or merge one Freebuff launch config file.
+    """Create or merge Freebuff's launch registry (``~/.agents/mcp.json``).
 
-    Unlike the other JSON targets, a MISSING Freebuff config is CREATED
-    (that is the point of --mode freebuff: a fresh machine needs zero
-    hand-editing); the written file carries a comment key explaining the
-    consent-sidecar step. Existing files are merged like every other
-    target: other servers preserved, BOM tolerated, CRLF style kept,
-    corrupt files skipped, never overwritten.
+    Unlike the other JSON targets, a MISSING file is CREATED (that is the
+    point of --mode freebuff: a fresh machine needs zero hand-editing); the
+    written file carries a comment key explaining the consent-sidecar step.
+    Existing files are merged like every other target: other servers
+    preserved, BOM tolerated, CRLF style kept, corrupt files skipped,
+    never overwritten. Note desktop-control and codetalker share this file
+    by design (Freebuff treats it as the cross-harness registry).
     """
     if not path.exists():
         if dry_run:
@@ -294,10 +294,10 @@ def install(
             results.append(f"  {name:<22} {merge_json_config(path, command, args, dry_run)}")
 
     freebuff_hint = (
-        "  Freebuff (sidecar)     launch configs written above; the consent\n"
-        "                         sidecar is client-managed: restart Freebuff,\n"
-        "                         approve the codetalker manifest in the UI,\n"
-        "                         then verify with codetalk_capabilities.\n"
+        "  Freebuff (sidecar)     launch registry written above; the consent\n"
+        "                         sidecar (~/.freebuff/mcp.json) is client-managed:\n"
+        "                         restart Freebuff, approve the codetalker manifest\n"
+        "                         in the UI, then verify with codetalk_capabilities.\n"
         "  NOTE: the PowerShell variant (scripts/install-harnesses.ps1) adds\n"
         "        a uv-tool-install option on Windows; results are identical."
     )
