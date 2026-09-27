@@ -75,7 +75,8 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
             "(<since_your_last_turn>, <failed_turn>), an antecedent-less user "
             "message ('done', 'continue', 'ok'), or any missing/wiped context. "
             "One call resolves the latest session for a working_directory and "
-            "returns its most recent turns plus a fresh continue token."
+            "returns its most recent turns; verification anchors are minted "
+            "only on request (issue_token=true)."
         ),
         "do_not_use_when": (
             "Healthy turns with intact context — recovery is trigger-gated, so "
@@ -91,7 +92,8 @@ TOOL_CATALOG: dict[str, dict[str, str]] = {
         ),
         "do_not_use_when": (
             "You need the recent turns themselves — codetalk_recover returns "
-            "verification and turns together."
+            "verification and turns together (anchor only when issued via "
+            "issue_token=true)."
         ),
     },
     "codetalk_resolve_session": {

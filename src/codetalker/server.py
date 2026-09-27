@@ -736,8 +736,9 @@ def _iso_timestamp(ts: Any) -> Any:
         "(<since_your_last_turn>, <failed_turn>) or an antecedent-less message "
         "is the trigger — healthy turns need no call. Optionally pass claimed_token "
         "(a codetalker-v3-continue line you were given earlier) to have your memory "
-        "verified against the server's issuance ledger. Nothing needs to be "
-        "appended to your replies."
+        "verified against the server's issuance ledger. Verification anchors are "
+        "minted only on request: pass issue_token=true to include a fresh one in "
+        "the payload. Nothing needs to be appended to your replies."
     ),
 )
 def codetalk_recover(
@@ -748,6 +749,7 @@ def codetalk_recover(
     user_turns: int = 6,
     max_step_chars: int = 1200,
     claimed_token: str | None = None,
+    issue_token: bool = False,
 ) -> str:
     """Resolve the latest session for a workspace and return its recent turns."""
     adapter, session = _resolve_session_by_working_directory(
@@ -825,13 +827,20 @@ def codetalk_recover(
         )
 
     last_user_text = recent_user[-1]["text"] if recent_user else ""
-    continue_token_line = emit_continue_token(
-        session_id=session.session_id,
-        working_directory=working_directory,
-        last_user_step_index=recent_user[-1]["step_index"] if recent_user else None,
-        total_steps=pagination.total_steps_available,
-        last_user_text=last_user_text,
-    )
+    # v0.3.8: anchor issuance is OPT-IN. The visible token artifact repeatedly
+    # re-seeded echo rituals on clients whose cached schemas still carried the
+    # retired v0.3 mandate (observed in the field), so the default recover
+    # payload ships no token at all. Callers that want a verifiable anchor
+    # pass issue_token=True; the ledger still records only what is issued.
+    continue_token_line: str | None = None
+    if issue_token:
+        continue_token_line = emit_continue_token(
+            session_id=session.session_id,
+            working_directory=working_directory,
+            last_user_step_index=recent_user[-1]["step_index"] if recent_user else None,
+            total_steps=pagination.total_steps_available,
+            last_user_text=last_user_text,
+        )
 
     payload: dict[str, Any] = {
         "recovered": True,
@@ -855,7 +864,6 @@ def codetalk_recover(
             if anchor_check
             else {"claimed": False}
         ),
-        "continue_token": continue_token_line,
         "next_steps": (
             "State one line of what you recovered and from when, then act. For "
             "deeper history: codetalk_read(session_id=<session.session_id>, "
@@ -865,6 +873,8 @@ def codetalk_recover(
             "no token needs to be echoed anywhere."
         ),
     }
+    if continue_token_line is not None:
+        payload["continue_token"] = continue_token_line
     payload.update(_payload_meta(payload))
     return json.dumps(payload, indent=2)
 
@@ -877,7 +887,7 @@ def codetalk_recover(
         "loading full turns. Pass the token line you were given plus the project "
         "working_directory. Use when you need to confirm your memory is real "
         "before acting on it; codetalk_recover is the fuller form (recent turns "
-        "plus a fresh token)."
+        "plus verification, with anchors issued only via issue_token=true)."
     ),
 )
 def codetalk_recover_token(

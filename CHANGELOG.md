@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.8 — 2026-09-27
+
+- Change: **continue-token issuance is now opt-in.** `codetalk_recover`
+  accepts `issue_token` (default `false`) and the recovery payload ships
+  **no** `codetalker-v3-continue` artifact unless the caller explicitly
+  asks for one. Field-observed failure mode this closes: the visible
+  per-turn token kept re-seeding echo rituals on clients whose cached tool
+  schemas still carried the retired v0.3 mandate — surviving the 0.3.5
+  instruction scrub, the 0.3.7 description scrub, a consent re-approval,
+  and an app restart (the habituation lives in the thread, and the token
+  artifact itself kept arriving in every recover payload). Verification
+  semantics are unchanged: `codetalk_recover_token` still checks anchors
+  against the issuance ledger (transcript fallback for pre-0.3.5 tokens),
+  and `issue_token=true` anchors round-trip through it.
+- Tests: default-payload token absence, opt-in issuance shape, and the
+  issue → verify round-trip; recovery-test ledger writes isolated from the
+  real home directory.
+
 ## 0.3.7 — 2026-09-20
 
 - Supersedes 0.3.5 for real: that wheel was built by CI from the tagged

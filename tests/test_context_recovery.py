@@ -4,12 +4,14 @@ from pathlib import Path
 import pytest
 
 import codetalker.server as server_module
+from codetalker import continuity as continuity_module
 from codetalker.agent_guidance import (
     SERVER_INSTRUCTIONS,
     SERVER_INSTRUCTIONS_FALLBACK,
     TOOL_CATALOG,
     select_instructions,
 )
+from codetalker.continuity import CONTINUE_TOKEN_PREFIX, parse_continue_token
 from codetalker.server import (
     SessionLookupError,
     codetalk_capabilities,
@@ -167,3 +169,72 @@ def test_initialize_tailoring_patch_is_active():
 def test_tool_catalog_features_codetalk_recover():
     assert "codetalk_recover" in TOOL_CATALOG
     assert "antecedent" in TOOL_CATALOG["codetalk_recover"]["use_when"]
+
+
+# ─── v0.3.8: continue-token issuance is OPT-IN ─────────────────────────────
+
+
+@pytest.fixture()
+def _isolated_token_ledger(tmp_path, monkeypatch):
+    """Keep issuance-ledger writes out of the real ~/.codetalker."""
+    monkeypatch.setattr(
+        continuity_module, "TOKEN_LEDGER_PATH", str(tmp_path / "tokens.jsonl")
+    )
+
+
+def test_codetalk_recover_omits_token_by_default(_isolated_token_ledger):
+    """v0.3.8: the default recover payload ships NO token artifact.
+
+    Rationale: the visible codetalker-v3-continue line repeatedly re-seeded
+    echo rituals on clients whose cached schemas still carried the retired
+    v0.3 'end your turn with it' mandate — even after the mandate was
+    scrubbed from the server (0.3.5) and the tool descriptions (0.3.7).
+    """
+    payload = json.loads(
+        codetalk_recover(
+            working_directory=WORKING_DIR,
+            harness="chatgpt",
+            root_path=str(ROLLOUT_FIXTURE),
+        )
+    )
+    assert payload["recovered"] is True
+    assert "continue_token" not in payload
+
+
+def test_codetalk_recover_issues_token_when_requested(_isolated_token_ledger):
+    payload = json.loads(
+        codetalk_recover(
+            working_directory=WORKING_DIR,
+            harness="chatgpt",
+            root_path=str(ROLLOUT_FIXTURE),
+            issue_token=True,
+        )
+    )
+    line = payload.get("continue_token")
+    assert isinstance(line, str) and line.startswith(CONTINUE_TOKEN_PREFIX + " ")
+    token = parse_continue_token(line)
+    assert token is not None
+    assert token.session_id == "codex_sample_rollout"
+    assert token.working_directory == WORKING_DIR
+
+
+def test_issued_token_round_trips_through_recover_token(_isolated_token_ledger):
+    """An opt-in anchor must still verify via codetalk_recover_token."""
+    recover_payload = json.loads(
+        codetalk_recover(
+            working_directory=WORKING_DIR,
+            harness="chatgpt",
+            root_path=str(ROLLOUT_FIXTURE),
+            issue_token=True,
+        )
+    )
+    check_payload = json.loads(
+        codetalk_recover_token(
+            working_directory=WORKING_DIR,
+            harness="chatgpt",
+            root_path=str(ROLLOUT_FIXTURE),
+            claimed_token=recover_payload["continue_token"],
+        )
+    )
+    assert check_payload["memory_check"]["claimed"] is True
+    assert check_payload["memory_check"]["matches"] is True
