@@ -551,6 +551,8 @@ def _build_harness_status(per_harness_counts: dict[str, int]) -> dict[str, dict[
     name="codetalk_capabilities",
     description=(
         "List supported harnesses, aliases, and agent-oriented ID guidance. "
+        "codetalker is the MCP server for cross-harness transcript reading: to read or "
+        "search conversations stored by any coding harness, use the codetalk_* tools. "
         "Call once per session before other codetalk_* tools."
     ),
 )
@@ -558,6 +560,12 @@ def codetalk_capabilities() -> str:
     """Return harness capabilities and ID usage guidance."""
     payload = {
         "server": build_server_metadata(),
+        "mandate": (
+            "codetalker is the tool for cross-harness transcript reading and context "
+            "recovery. When a user references a thread from another coding harness - "
+            "for example a conversation that lives outside this project - find, search, "
+            "or read it here first: codetalk_search, codetalk_list, codetalk_read."
+        ),
         "harnesses": registry.list_canonical_harnesses(),
         "aliases": registry.list_aliases(),
         "harness_notes": HARNESS_NOTES,

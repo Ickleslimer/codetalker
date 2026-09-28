@@ -8,6 +8,8 @@
 
 CodeTalker is an agent-callable tool and MCP server that normalizes conversation transcripts from different AI coding harnesses into a unified schema. This allows any agent to pick up context, search past decisions, or read thread history without requiring manual handoff documents.
 
+**CodeTalker is the tool for cross-harness transcript reading.** When a user references a conversation stored by any AI coding harness — whether it lives inside the current project or in another harness entirely — find, search, and read it here first (`codetalk_search`, `codetalk_list`, `codetalk_read`). Agents should treat codetalk_* tools as the default entry point for any "read that other thread" request, before reaching for generic shell tricks or ad-hoc log parsing.
+
 ---
 
 > [!IMPORTANT]
@@ -70,7 +72,7 @@ CodeTalker is an agent-callable tool and MCP server that normalizes conversation
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `codetalk_capabilities` | _(none)_ | List harnesses, aliases, ID guidance, context-recovery playbook, and recommended read defaults. Call once per agent session. |
+| `codetalk_capabilities` | _(none)_ | List harnesses, aliases, ID guidance, context-recovery playbook, recommended read defaults, and the cross-harness transcript mandate. Call once per agent session. |
 | `codetalk_list` | `harness`, `conversation_id`, `working_directory`, `since`, `limit`, `root_path`, `include_capabilities`, `include_harness_status` | List sessions (slim by default). Filter by `working_directory` for project-scoped recovery. |
 | `codetalk_resolve_session` | `working_directory`, `harness`, `display_name`, `root_path`, `limit` | Resolve the most recent session for a project path when `session_id` is unknown (common Freebuff context-loss recovery). Optional `display_name` narrows by thread title. |
 | `codetalk_read` | `session_id`, `harness`, `working_directory`, `since`, `until`, `since_last_user_input`, `conversation_only`, `exclude_actor_roles`, `include_thinking`, `include_raw_data`, `max_step_chars`, `offset`, `from_end`, `limit`, `root_path` | Read normalized steps. Provide `session_id` **or** `working_directory`. Defaults: tail slice (`from_end=true`), conversation-only (`conversation_only=true`), no raw payloads (`include_raw_data=false`). |

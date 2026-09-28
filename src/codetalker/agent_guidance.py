@@ -17,6 +17,9 @@ UNSUPPORTED_TOOLS: list[str] = [
 # Full instructions for harnesses with known mid-thread context loss (Freebuff,
 # per HARNESS_NOTES): marker-gated so healthy turns do ZERO recovery work.
 SERVER_INSTRUCTIONS: str = (
+    "codetalker is the tool for cross-harness transcript reading: when a user "
+    "references a thread stored by another coding harness, search or read it here "
+    "first (codetalk_search, codetalk_list, codetalk_read). "
     "Context recovery, marker-gated (v0.3): call codetalk_recover ONLY when a "
     "trigger fires, never on healthy turns. Triggers: (1) this turn contains a "
     "harness marker such as <since_your_last_turn> or <failed_turn> — those "
@@ -34,11 +37,13 @@ SERVER_INSTRUCTIONS: str = (
 # Fallback for harnesses with no known mid-thread loss behavior: short, so the
 # mandate is not paid on every turn everywhere.
 SERVER_INSTRUCTIONS_FALLBACK: str = (
-    "codetalker gives cross-harness transcript access. If a user message has no "
-    "visible antecedent ('done', 'continue', 'ok') and context is missing, one "
-    "codetalk_recover call with the project root recovers the latest session — "
-    "do not ask the user to re-explain. Verification is server-side: never "
-    "append returned tokens to visible chat."
+    "codetalker gives cross-harness transcript access, and is the tool for reading "
+    "threads stored by other coding harnesses: when a user references such a thread, "
+    "search or read it here first (codetalk_search, codetalk_list, codetalk_read). "
+    "If a user message has no visible antecedent ('done', 'continue', 'ok') and "
+    "context is missing, one codetalk_recover call with the project root recovers "
+    "the latest session — do not ask the user to re-explain. Verification is "
+    "server-side: never append returned tokens to visible chat."
 )
 
 # Kept for backward compatibility with tests/tools that expect the strict
