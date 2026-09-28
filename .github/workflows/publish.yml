@@ -88,23 +88,32 @@ jobs:
         env:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
-          # python3 over jq: guaranteed on the runner, no extra dependency
-          get_json_field() {
-            curl -sf https://pypi.org/pypi/codetalker-mcp/json \
-              | python3 -c "import json,sys; print(json.load(sys.stdin)['info']['$1'])"
+          # Poll the VERSION-SPECIFIC endpoint, not the aggregate one. PyPI's CDN
+          # serves /pypi/<dist>/<version>/json within seconds of upload, while the
+          # top-level "latest" pointer and the /simple/ index can lag by many
+          # minutes (seen live on the v0.3.9 release, 2026-09-28: this gate failed
+          # twice on a healthy upload confirmed with 200 OK). curl --retry absorbs
+          # transient 5xx/429s; the loop bounds the total wait at ~20 minutes so a
+          # genuinely failed upload still fails loudly.
+          try_fetch() {
+            curl -sfL --retry 3 --retry-delay 3 --max-time 20 \
+              "https://pypi.org/pypi/codetalker-mcp/${VERSION}/json" \
+              | python3 -c "import json,sys; info=json.load(sys.stdin)['info']; open('pypi-description.md','w',encoding='utf-8').write(info['description']); print(info['version'])"
           }
-          for i in $(seq 1 12); do
-            LIVE=$(get_json_field version || true)
+          for i in $(seq 1 20); do
+            rm -f pypi-description.md
+            LIVE=$(try_fetch 2>/dev/null | tail -1)
             echo "attempt $i: PyPI serves version=${LIVE:-<none>} (want $VERSION)"
-            if [ "$LIVE" = "$VERSION" ]; then break; fi
-            if [ "$i" = "12" ]; then
-              echo "::error::PyPI still does not serve $VERSION after 2 minutes — not cutting a release with unpaired notes"
+            if [ "$LIVE" = "$VERSION" ] && [ -s pypi-description.md ]; then
+              echo "description bytes: $(wc -c < pypi-description.md)"
+              break
+            fi
+            if [ "$i" = "20" ]; then
+              echo "::error::PyPI still does not serve $VERSION after 20 minutes — not cutting a release with unpaired notes"
               exit 1
             fi
-            sleep 10
+            sleep 60
           done
-          get_json_field description > pypi-description.md
-          wc -c pypi-description.md
 
       - name: Assemble paired release notes
         env:
